@@ -1,0 +1,18 @@
+# Input data files (large, user-supplied)
+input/*.zst
+input/*.txt
+input/*.csv
+input/*.jsonl
+
+# Pipeline outputs (generated, not source)
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,37 +1,43 @@
 """
-SaaS Word Extractor — Main Pipeline Orchestrator
-================================================
-Entry point for the full 12-step pipeline.
+SaaS Word Extractor — Pipeline Script
+======================================
+Python script 담당 단계만 실행한다. AI 판정(Steps 5-8)은
+Claude Code 세션이 직접 수행한다.
 
-Usage:
-  python src/pipeline.py [options]
+사용법:
+  python src/pipeline.py --phase prep    # Steps 1-4: 파일 탐색·로드·정규화·규칙 스크리닝
+  python src/pipeline.py --phase consensus  # Step 8 투표 집계 (Steps 5-7 완료 후)
+  python src/pipeline.py --phase export  # Steps 9-10: JSONL/JSON·XLSX/CSV 저장
+  python src/pipeline.py --phase qa      # Step 12: QA 리포트 조립
 
-Options:
-  --resume          Skip steps whose intermediate files already exist.
-  --skip-qa         Run steps 1-10 but skip QA (steps 11-12).
-  --max-words N     Limit total words entering the AI pipeline (for testing).
-  --help            Show this message.
+전체 파이프라인 실행 순서:
+  1. python src/pipeline.py --phase prep
+  2. Claude Code 세션이 Steps 5-7 수행
+       (output/intermediate/04 → 05 → 06 → 07)
+  3. python src/pipeline.py --phase consensus
+  4. python src/pipeline.py --phase export
+  5. Claude Code 세션이 Step 12 QA 판정 수행
+  6. python src/pipeline.py --phase qa
 
-Prerequisites:
-  pip install -r requirements.txt
-  export ANTHROPIC_API_KEY=<your-key>
-  Put word list files in  ./input/  (*.txt / *.jsonl / *.txt.zst / *.csv)
+옵션:
+  --resume      이미 존재하는 중간 파일이 있으면 해당 단계 건너뜀
+  --max-words N prep 단계에서 처리할 최대 단어 수 (테스트용)
 """
 
 import argparse
 import datetime
 import sys
-import os
 from pathlib import Path
 
-# Add src/ to path so imports work when running from project root
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
-    INPUT_DIR,
+    INTER_CONSENSUS,
+    INTER_REBUTTED,
+    INTER_SCREENED,
+    OUTPUT_DIR,
     INTERMEDIATE_DIR,
     HUMAN_REVIEW_DIR,
-    OUTPUT_DIR,
     QA_DIR,
     PIPELINE_VERSION,
 )
@@ -40,153 +46,152 @@ from utils import get_logger
 log = get_logger("pipeline")
 
 
-def _ensure_directories():
+def _ensure_dirs():
     for d in [OUTPUT_DIR, INTERMEDIATE_DIR, HUMAN_REVIEW_DIR, QA_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
-def run_pipeline(resume: bool = False, skip_qa: bool = False, max_words: int = 0):
-    _ensure_directories()
+# ---------------------------------------------------------------------------
+# Phase: prep  (Steps 1-4)
+# ---------------------------------------------------------------------------
 
+def phase_prep(resume: bool = False, max_words: int = 0):
     log.info("=" * 60)
-    log.info("SaaS Word Extractor  version=%s", PIPELINE_VERSION)
-    log.info("resume=%s  skip_qa=%s  max_words=%s",
-             resume, skip_qa, max_words or "unlimited")
+    log.info("Phase: PREP  (Steps 1-4)")
     log.info("=" * 60)
+    _ensure_dirs()
 
-    start_time = datetime.datetime.utcnow()
-
-    # ------------------------------------------------------------------
-    # Step 1 — Input file discovery
-    # ------------------------------------------------------------------
-    log.info("[Step 1] Input file discovery")
     import input_discovery
-    file_descriptors = input_discovery.run(resume=resume)
-    supported_files = [f for f in file_descriptors if f.get("supported")]
-    log.info("  Found %d supported input file(s)", len(supported_files))
-
-    # ------------------------------------------------------------------
-    # Step 2 — File loading & decompression
-    # ------------------------------------------------------------------
-    log.info("[Step 2] Loading files")
     import input_loader
-    loaded_records = input_loader.run(file_descriptors, resume=resume)
-    log.info("  Loaded %d raw tokens", len(loaded_records))
-
-    if max_words and len(loaded_records) > max_words:
-        log.info("  Limiting to first %d tokens (--max-words)", max_words)
-        loaded_records = loaded_records[:max_words]
-
-    # ------------------------------------------------------------------
-    # Step 3 — Normalization
-    # ------------------------------------------------------------------
-    log.info("[Step 3] Token normalization")
     import token_normalizer
-    normalized_records = token_normalizer.run(loaded_records, resume=resume)
-    log.info("  Normalized %d tokens", len(normalized_records))
-
-    # ------------------------------------------------------------------
-    # Step 4 — Rule-based 1st-pass screening
-    # ------------------------------------------------------------------
-    log.info("[Step 4] Rule-based screening")
     import rule_screener
-    passed_records, rule_rejected = rule_screener.run(normalized_records, resume=resume)
-    log.info("  Passed: %d  |  Rule-rejected: %d", len(passed_records), len(rule_rejected))
 
-    # ------------------------------------------------------------------
-    # Steps 5–8 — AI semantic review (primary → challenge → rebuttal → consensus)
-    # ------------------------------------------------------------------
-    log.info("[Steps 5-8] AI semantic review pipeline")
-    from ai_review import AIReviewer
-    reviewer = AIReviewer()
+    # Step 1
+    log.info("[Step 1] Input file discovery")
+    file_descriptors = input_discovery.run(resume=resume)
+    supported = [f for f in file_descriptors if f.get("supported")]
+    log.info("  %d supported file(s) found", len(supported))
 
-    log.info("[Step 5] Primary AI review (5 judges)")
-    primary_results = reviewer.run_primary_review(passed_records, resume=resume)
+    # Step 2
+    log.info("[Step 2] Loading files")
+    loaded = input_loader.run(file_descriptors, resume=resume, max_lines=max_words)
+    log.info("  %d raw tokens loaded", len(loaded))
 
-    log.info("[Step 6] Challenge review (5 challengers)")
-    challenged_results = reviewer.run_challenge_review(primary_results, resume=resume)
+    # Step 3
+    log.info("[Step 3] Token normalization + underscore splitting")
+    normalized = token_normalizer.run(loaded, resume=resume)
+    log.info("  %d unique normalized words", len(normalized))
 
-    log.info("[Step 7] Rebuttal review (3 rebuttal reviewers)")
-    rebutted_results = reviewer.run_rebuttal_review(challenged_results, resume=resume)
+    # Step 4
+    log.info("[Step 4] Rule-based screening")
+    passed, rule_rejected = rule_screener.run(normalized, resume=resume)
+    log.info("  %d passed  |  %d rule-rejected", len(passed), len(rule_rejected))
 
-    log.info("[Step 8] Consensus engine")
-    consensus_records = reviewer.run_consensus(rebutted_results, resume=resume)
+    log.info("")
+    log.info("Prep phase complete.")
+    log.info("Next: Claude Code 세션이 Steps 5-7 AI 판정을 수행해야 합니다.")
+    log.info("  Input  : %s", INTER_SCREENED)
+    log.info("  Output : output/intermediate/05_primary_reviewed.jsonl")
+    log.info("           output/intermediate/06_challenged.jsonl")
+    log.info("           output/intermediate/07_rebutted.jsonl")
+    log.info("After Steps 5-7: python src/pipeline.py --phase consensus")
 
-    accept_n = sum(1 for r in consensus_records if r.get("decision") == "accept")
-    reject_n = sum(1 for r in consensus_records if r.get("decision") == "reject")
-    log.info("  Consensus: %d accept  |  %d reject", accept_n, reject_n)
-
-    # ------------------------------------------------------------------
-    # Step 9 — Result writer (JSONL/JSON)
-    # ------------------------------------------------------------------
-    log.info("[Step 9] Writing JSONL/JSON results")
-    import result_writer
-    run_meta = {
-        "total_loaded": len(loaded_records),
-        "total_normalized": len(normalized_records),
-        "total_rule_passed": len(passed_records),
-        "total_rule_rejected": len(rule_rejected),
-        "total_ai_reviewed": len(consensus_records),
-        "start_time": start_time.isoformat() + "Z",
-        "end_time": datetime.datetime.utcnow().isoformat() + "Z",
-        "input_files": [f["filename"] for f in supported_files],
-    }
-    saas_records, all_rejected = result_writer.run(consensus_records, rule_rejected, run_meta)
-    log.info("  saas_words.jsonl: %d records", len(saas_records))
-    log.info("  rejected_words.jsonl: %d records", len(all_rejected))
-
-    # ------------------------------------------------------------------
-    # Step 10 — Human review XLSX/CSV
-    # ------------------------------------------------------------------
-    log.info("[Step 10] Human review export (XLSX/CSV)")
-    import human_review_exporter
-    human_review_exporter.run(saas_records, all_rejected)
-
-    # ------------------------------------------------------------------
-    # Step 11 — QA: same pipeline re-run (entry point reuse)
-    # Note: QA uses the final output files, not a separate codebase.
-    # ------------------------------------------------------------------
-    if skip_qa:
-        log.info("[Steps 11-12] QA skipped (--skip-qa)")
-    else:
-        log.info("[Step 11-12] QA — multi-agent verification of outputs")
-        import qa_report_collator
-        qa_report_collator.run()
-
-    # ------------------------------------------------------------------
-    # Done
-    # ------------------------------------------------------------------
-    elapsed = (datetime.datetime.utcnow() - start_time).total_seconds()
-    log.info("=" * 60)
-    log.info("Pipeline complete in %.1f seconds", elapsed)
-    log.info("Outputs in: %s", OUTPUT_DIR)
-    log.info("=" * 60)
-
-    _print_output_summary()
-
-
-def _print_output_summary():
-    from config import (
-        OUT_SAAS_WORDS, OUT_REJECTED_WORDS, OUT_RUN_SUMMARY,
-        OUT_SAAS_REVIEW_XLSX, OUT_SAAS_REVIEW_CSV, OUT_REJECTED_REVIEW_XLSX,
-        OUT_QA_REPORT, OUT_QA_FINDINGS, OUT_QA_DISAGREEMENTS, OUT_QA_HUMAN_REVIEW_XLSX,
-    )
-
-    outputs = [
-        OUT_SAAS_WORDS, OUT_REJECTED_WORDS, OUT_RUN_SUMMARY,
-        OUT_SAAS_REVIEW_XLSX, OUT_SAAS_REVIEW_CSV, OUT_REJECTED_REVIEW_XLSX,
-        OUT_QA_REPORT, OUT_QA_FINDINGS, OUT_QA_DISAGREEMENTS, OUT_QA_HUMAN_REVIEW_XLSX,
-    ]
-
-    log.info("Output file manifest:")
-    for p in outputs:
-        status = "OK" if p.exists() else "MISSING"
-        size = f"({p.stat().st_size:,} bytes)" if p.exists() else ""
-        log.info("  [%s] %s %s", status, p.relative_to(OUTPUT_DIR.parent), size)
+    return passed, rule_rejected
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# Phase: consensus  (Step 8 — algorithmic vote aggregation)
+# ---------------------------------------------------------------------------
+
+def phase_consensus(resume: bool = False):
+    log.info("=" * 60)
+    log.info("Phase: CONSENSUS  (Step 8)")
+    log.info("=" * 60)
+
+    if resume and INTER_CONSENSUS.exists():
+        log.info("Resuming — %s already exists, skipping.", INTER_CONSENSUS)
+        from utils import read_jsonl
+        return read_jsonl(INTER_CONSENSUS)
+
+    import ai_review
+
+    log.info("[Step 8] Vote aggregation")
+    rebutted = ai_review.load_rebutted()
+    consensus = ai_review.build_consensus(rebutted)
+
+    accept_n = sum(1 for r in consensus if r["decision"] == "accept")
+    reject_n = sum(1 for r in consensus if r["decision"] == "reject")
+    log.info("  %d accept  |  %d reject", accept_n, reject_n)
+    log.info("Next: python src/pipeline.py --phase export")
+    return consensus
+
+
+# ---------------------------------------------------------------------------
+# Phase: export  (Steps 9-10)
+# ---------------------------------------------------------------------------
+
+def phase_export(resume: bool = False):
+    log.info("=" * 60)
+    log.info("Phase: EXPORT  (Steps 9-10)")
+    log.info("=" * 60)
+    _ensure_dirs()
+
+    import ai_review
+    import result_writer
+    import human_review_exporter
+    from config import INTER_SCREENED
+    from utils import read_jsonl
+
+    # Load consensus records
+    consensus = ai_review.load_rebutted()  # loads from INTER_REBUTTED
+    # Build/load consensus if not yet built
+    if not INTER_CONSENSUS.exists():
+        consensus_records = ai_review.build_consensus(consensus)
+    else:
+        consensus_records = read_jsonl(INTER_CONSENSUS)
+
+    # Load rule-rejected records (from screened file)
+    all_screened = read_jsonl(INTER_SCREENED)
+    rule_rejected = [r for r in all_screened if r.get("screen_result") == "reject"]
+
+    # Step 9
+    log.info("[Step 9] Writing JSONL/JSON results")
+    run_meta = {
+        "pipeline_version": PIPELINE_VERSION,
+        "export_time": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    saas_records, all_rejected = result_writer.run(
+        consensus_records, rule_rejected, run_meta
+    )
+
+    # Step 10
+    log.info("[Step 10] Human review XLSX/CSV export")
+    human_review_exporter.run(saas_records, all_rejected)
+
+    log.info("")
+    log.info("Export phase complete.")
+    log.info("Next (optional): Claude Code 세션이 Step 12 QA 판정을 수행합니다.")
+    log.info("After QA judgment: python src/pipeline.py --phase qa")
+    return saas_records, all_rejected
+
+
+# ---------------------------------------------------------------------------
+# Phase: qa  (Step 12 — QA report collation, script side)
+# ---------------------------------------------------------------------------
+
+def phase_qa():
+    log.info("=" * 60)
+    log.info("Phase: QA  (Step 12 — report collation)")
+    log.info("=" * 60)
+    _ensure_dirs()
+
+    import qa_report_collator
+    qa_report_collator.run()
+    log.info("QA collation complete.")
+
+
+# ---------------------------------------------------------------------------
+# CLI
 # ---------------------------------------------------------------------------
 
 def main():
@@ -195,26 +200,38 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    parser.add_argument(
+        "--phase",
+        required=True,
+        choices=["prep", "consensus", "export", "qa"],
+        help="실행할 파이프라인 단계",
+    )
     parser.add_argument("--resume", action="store_true",
-                        help="Resume from last completed step")
-    parser.add_argument("--skip-qa", action="store_true",
-                        help="Skip QA steps (11-12)")
+                        help="중간 파일이 있으면 해당 단계 재사용")
     parser.add_argument("--max-words", type=int, default=0,
-                        help="Limit number of words for testing (0=unlimited)")
+                        help="prep 단계 처리 단어 수 제한 (테스트용, 0=무제한)")
     args = parser.parse_args()
 
+    start = datetime.datetime.utcnow()
+
     try:
-        run_pipeline(
-            resume=args.resume,
-            skip_qa=args.skip_qa,
-            max_words=args.max_words,
-        )
+        if args.phase == "prep":
+            phase_prep(resume=args.resume, max_words=args.max_words)
+        elif args.phase == "consensus":
+            phase_consensus(resume=args.resume)
+        elif args.phase == "export":
+            phase_export(resume=args.resume)
+        elif args.phase == "qa":
+            phase_qa()
     except KeyboardInterrupt:
-        log.warning("Pipeline interrupted by user.")
+        log.warning("Interrupted.")
         sys.exit(1)
     except Exception as exc:
         log.error("Pipeline failed: %s", exc, exc_info=True)
         sys.exit(2)
+
+    elapsed = (datetime.datetime.utcnow() - start).total_seconds()
+    log.info("Done in %.1f seconds.", elapsed)
 
 
 if __name__ == "__main__":

@@ -97,10 +97,15 @@ def _iter_file(path: Path) -> Iterator[tuple[str, int]]:
 # Step runner
 # ---------------------------------------------------------------------------
 
-def run(file_descriptors: list[dict], resume: bool = False) -> list[dict]:
+def run(
+    file_descriptors: list[dict],
+    resume: bool = False,
+    max_lines: int = 0,
+) -> list[dict]:
     """
     Load all supported input files, write a LOADED intermediate JSONL,
     and return the list of token records.
+    max_lines: stop loading after this many lines total (0 = no limit).
     If resume=True and the intermediate file exists, skip loading.
     """
     if resume and INTER_LOADED.exists():
@@ -136,6 +141,9 @@ def run(file_descriptors: list[dict], resume: bool = False) -> list[dict]:
                 append_jsonl(INTER_LOADED, record)
                 records.append(record)
                 file_count += 1
+                if max_lines and total_lines + file_count >= max_lines:
+                    log.info("  max_lines=%d reached, stopping early", max_lines)
+                    break
         except Exception as exc:
             log.error("Failed to load %s: %s (skipping)", filename, exc)
             continue

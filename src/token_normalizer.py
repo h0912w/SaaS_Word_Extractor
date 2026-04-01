@@ -1,24 +1,19 @@
 """
-Step 3 — Token normalization.
-Applies lightweight, deterministic transformations so that downstream
-stages work on clean, lowercase tokens.
+Step 3 — Token normalization + word extraction.
 
-Rules applied (in order):
-  1. Strip leading/trailing whitespace
-  2. Lowercase
-  3. Remove zero-width / control characters (except ordinary whitespace)
-  4. Collapse internal whitespace to single space
-  5. Strip common wiki/encyclopedic suffixes like _(band), _(disambiguation)
-  6. Strip trailing punctuation that is clearly not part of the word
-  7. Record the transformation so auditors can verify it
+Input entries are Wikipedia article titles (e.g. forge_welding, pulse_(band)).
+This module:
+  1. Strips wiki suffixes  (_(band), _(disambiguation), …)
+  2. Lowercases
+  3. Splits on underscores → extracts individual component words
+  4. Strips boundary punctuation from each component
+  5. Globally deduplicates by normalized_word
+  6. Flags multi-word entries for auditor review
 
-This module does NOT make semantic decisions — it only applies deterministic
-string transformations.  Borderline cases are preserved and flagged
-so LLM auditors (normalization-auditor-a/b/c) can review them.
+Result: one JSONL record per unique normalized single word.
 """
 
 import re
-import unicodedata
 from pathlib import Path
 
 from config import INTER_NORMALIZED, PIPELINE_VERSION
@@ -26,78 +21,104 @@ from utils import get_logger, append_jsonl, read_jsonl
 
 log = get_logger("token_normalizer")
 
-# Patterns that indicate an encyclopedic/wiki artifact suffix
-# Handles: " (band)", "_(disambiguation)", " [music]", etc.
+# Wiki suffix: _(band), _(disambiguation), [music], etc.
 WIKI_SUFFIX_RE = re.compile(r"[_\s]*[\(\[]\s*[a-z][^\)\]]*[\)\]]$", re.IGNORECASE)
 
-# Control characters to strip (everything < 0x20 except tab/newline, plus surrogates)
+# Control characters
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
 
-# Trailing punctuation that is never part of a word token
+# Boundary punctuation
 TRAILING_PUNCT_RE = re.compile(r"[.,;:!?\"'\)\]\}]+$")
-# Leading punctuation
 LEADING_PUNCT_RE = re.compile(r"^[\"'\(\[\{]+")
 
 
-def normalize_token(raw: str) -> dict:
+# ---------------------------------------------------------------------------
+# Core normalization (single string → single string)
+# ---------------------------------------------------------------------------
+
+def normalize_raw(raw: str) -> tuple[str, list[str]]:
     """
-    Normalize a single raw token.
-    Returns a dict with keys: normalized_word, transformations, flag.
+    Apply deterministic string transforms to a raw line.
+    Returns (normalized_string, list_of_transforms_applied).
+    Does NOT split on underscores yet.
     """
-    transformations = []
+    transforms = []
     token = raw
 
-    # 1. Strip outer whitespace
-    stripped = token.strip()
-    if stripped != token:
-        transformations.append("strip_whitespace")
-    token = stripped
+    s = token.strip()
+    if s != token:
+        transforms.append("strip_whitespace")
+    token = s
 
-    # 2. Remove control characters
-    cleaned = CONTROL_RE.sub("", token)
-    if cleaned != token:
-        transformations.append("remove_control_chars")
-    token = cleaned
+    c = CONTROL_RE.sub("", token)
+    if c != token:
+        transforms.append("remove_control_chars")
+    token = c
 
-    # 3. Lowercase
-    lower = token.lower()
-    if lower != token:
-        transformations.append("lowercase")
-    token = lower
+    lo = token.lower()
+    if lo != token:
+        transforms.append("lowercase")
+    token = lo
 
-    # 4. Strip wiki suffixes like _(band), (disambiguation)
-    wiki_stripped = WIKI_SUFFIX_RE.sub("", token).strip()
-    if wiki_stripped != token:
-        transformations.append("strip_wiki_suffix")
-    token = wiki_stripped
+    ws = WIKI_SUFFIX_RE.sub("", token).strip()
+    if ws != token:
+        transforms.append("strip_wiki_suffix")
+    token = ws
 
-    # 5. Strip leading/trailing non-word punctuation
-    lead_stripped = LEADING_PUNCT_RE.sub("", token).strip()
-    trail_stripped = TRAILING_PUNCT_RE.sub("", lead_stripped).strip()
-    if trail_stripped != token:
-        transformations.append("strip_boundary_punct")
-    token = trail_stripped
+    lp = LEADING_PUNCT_RE.sub("", token).strip()
+    tp = TRAILING_PUNCT_RE.sub("", lp).strip()
+    if tp != token:
+        transforms.append("strip_boundary_punct")
+    token = tp
 
-    # 6. Collapse internal whitespace
-    collapsed = re.sub(r"\s+", " ", token).strip()
-    if collapsed != token:
-        transformations.append("collapse_whitespace")
-    token = collapsed
+    col = re.sub(r"\s+", " ", token).strip()
+    if col != token:
+        transforms.append("collapse_whitespace")
+    token = col
 
-    # Flag if result looks multi-token (contains space after normalization)
-    flag = "multi_token" if " " in token else None
+    return token, transforms
 
-    return {
-        "normalized_word": token,
-        "transformations": transformations,
-        "normalization_flag": flag,
-    }
 
+# ---------------------------------------------------------------------------
+# Underscore splitting → list of component words
+# ---------------------------------------------------------------------------
+
+def split_to_words(normalized: str) -> list[str]:
+    """
+    Split an underscore-delimited Wikipedia title into component words.
+    Each component has boundary punctuation stripped again.
+    Empty parts are discarded.
+
+    Examples:
+      "forge_welding"   → ["forge", "welding"]
+      "pulse"           → ["pulse"]
+      "nexus"           → ["nexus"]
+      ""                → []
+    """
+    if not normalized:
+        return []
+
+    parts = normalized.split("_")
+    words = []
+    for part in parts:
+        part = LEADING_PUNCT_RE.sub("", part).strip()
+        part = TRAILING_PUNCT_RE.sub("", part).strip()
+        if part:
+            words.append(part)
+
+    return words if words else []
+
+
+# ---------------------------------------------------------------------------
+# Step runner
+# ---------------------------------------------------------------------------
 
 def run(loaded_records: list[dict], resume: bool = False) -> list[dict]:
     """
-    Step 3: normalize every loaded token and write to INTER_NORMALIZED.
-    If resume=True and the file exists, reload from cache.
+    Step 3: normalize every loaded token, split on underscores,
+    deduplicate globally, and write to INTER_NORMALIZED.
+
+    Returns a list of unique-word records.
     """
     if resume and INTER_NORMALIZED.exists():
         log.info("Resuming from %s", INTER_NORMALIZED)
@@ -106,16 +127,44 @@ def run(loaded_records: list[dict], resume: bool = False) -> list[dict]:
     if INTER_NORMALIZED.exists():
         INTER_NORMALIZED.unlink()
 
-    records = []
-    for rec in loaded_records:
-        norm = normalize_token(rec["raw_token"])
-        updated = {
-            **rec,
-            **norm,
-            "status": "NORMALIZED",
-        }
-        append_jsonl(INTER_NORMALIZED, updated)
-        records.append(updated)
+    seen_words: set[str] = set()
+    records: list[dict] = []
+    skipped_dupe = 0
+    skipped_empty = 0
 
-    log.info("Normalized %d tokens → %s", len(records), INTER_NORMALIZED)
+    for rec in loaded_records:
+        normalized_line, transforms = normalize_raw(rec["raw_token"])
+
+        component_words = split_to_words(normalized_line)
+
+        if not component_words:
+            skipped_empty += 1
+            continue
+
+        multi = len(component_words) > 1
+
+        for word in component_words:
+            if word in seen_words:
+                skipped_dupe += 1
+                continue
+            seen_words.add(word)
+
+            word_transforms = list(transforms)
+            if multi:
+                word_transforms.append("split_underscore")
+
+            new_rec = {
+                **rec,
+                "normalized_word": word,
+                "transformations": word_transforms,
+                "normalization_flag": "split_from_phrase" if multi else None,
+                "status": "NORMALIZED",
+            }
+            append_jsonl(INTER_NORMALIZED, new_rec)
+            records.append(new_rec)
+
+    log.info(
+        "Normalized: %d unique words  (dupes skipped: %d, empty skipped: %d) → %s",
+        len(records), skipped_dupe, skipped_empty, INTER_NORMALIZED,
+    )
     return records

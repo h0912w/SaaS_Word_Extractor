@@ -27,9 +27,9 @@ WIKI_SUFFIX_RE = re.compile(r"[_\s]*[\(\[]\s*[a-z][^\)\]]*[\)\]]$", re.IGNORECAS
 # Control characters
 CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
 
-# Boundary punctuation
+# Boundary punctuation (expanded to include common leading punctuation)
 TRAILING_PUNCT_RE = re.compile(r"[.,;:!?\"'\)\]\}]+$")
-LEADING_PUNCT_RE = re.compile(r"^[\"'\(\[\{]+")
+LEADING_PUNCT_RE = re.compile(r"^[\"'\(\[\{!@#$%^&*+\-=?\\|`~]+")
 
 
 # ---------------------------------------------------------------------------

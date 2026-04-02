@@ -14,7 +14,9 @@ Execution model:
   After Steps 5–7 are complete, call build_consensus() here to finalize.
 """
 
+import json
 from pathlib import Path
+from typing import Iterator
 
 from config import (
     ACCEPT_SCORE_THRESHOLD,
@@ -27,7 +29,7 @@ from config import (
     PIPELINE_VERSION,
     RISK_FLAG_THRESHOLD,
 )
-from utils import append_jsonl, get_logger, read_jsonl, write_jsonl
+from utils import append_jsonl, get_logger, iter_jsonl, read_jsonl, write_jsonl
 
 log = get_logger("ai_review")
 
@@ -245,3 +247,134 @@ def build_consensus(rebutted_records: list[dict]) -> list[dict]:
         accept_n, reject_n, INTER_CONSENSUS,
     )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Streaming variants (memory-efficient)
+# ---------------------------------------------------------------------------
+
+def iter_rebutted() -> Iterator[dict]:
+    """Stream rebutted records (memory-efficient variant of load_rebutted)."""
+    if not INTER_REBUTTED.exists():
+        raise FileNotFoundError(f"Step 7 output not found: {INTER_REBUTTED}")
+    return iter_jsonl(INTER_REBUTTED)
+
+
+def build_consensus_streaming(rebutted_iterator: Iterator[dict]) -> Path:
+    """
+    Step 8 streaming version: aggregate votes and write directly to file.
+    Returns path to written file (INTER_CONSENSUS).
+
+    Memory-efficient: processes one record at a time instead of loading all.
+    """
+    INTER_CONSENSUS.parent.mkdir(parents=True, exist_ok=True)
+
+    accept_count = 0
+    reject_count = 0
+
+    with open(INTER_CONSENSUS, "w", encoding="utf-8") as f:
+        for rec in rebutted_iterator:
+            # Per-record aggregation (extracted from _aggregate_votes loop)
+            accept_v = 0.0
+            reject_v = 0.0
+            abstain_v = 0.0
+            why_accept_hints: list[str] = []
+            reject_reason_hints: list[str] = []
+
+            # Primary votes (Step 5)
+            for vote in rec.get("primary_votes", []):
+                d = vote.get("decision", "borderline")
+                if d == "accept":
+                    accept_v += 1
+                    why_accept_hints.extend(vote.get("why", [])[:2])
+                elif d == "reject":
+                    reject_v += 1
+                    reject_reason_hints.extend(vote.get("why", [])[:2])
+                else:  # borderline
+                    accept_v += 0.5
+                    reject_v += 0.5
+                    abstain_v += 1
+
+            # Challenges (Step 6)
+            for ch in rec.get("challenges", []):
+                ct = ch.get("challenge_type", "")
+                sd = ch.get("suggested_decision", "")
+                if ct == "over_reject" or sd == "accept":
+                    accept_v += 0.5
+                elif ct == "over_accept" or sd == "reject":
+                    reject_v += 0.5
+                else:
+                    abstain_v += 1
+
+            # Rebuttals (Step 7)
+            for rb in rec.get("rebuttals", []):
+                rf = rb.get("recommended_final", "borderline")
+                if rf == "accept":
+                    accept_v += 0.5
+                elif rf == "reject":
+                    reject_v += 0.5
+                else:
+                    abstain_v += 1
+
+            total_decisive = accept_v + reject_v
+            if total_decisive == 0:
+                vote_ratio = 0.5
+            else:
+                vote_ratio = accept_v / total_decisive
+
+            # Base decision from vote ratio
+            if vote_ratio >= ACCEPT_SCORE_THRESHOLD:
+                base_decision = "accept"
+            elif vote_ratio >= BORDERLINE_SCORE_THRESHOLD:
+                base_decision = "borderline"
+            else:
+                base_decision = "reject"
+
+            # Primary label from plurality
+            label_counts: dict[str, int] = {}
+            for vote in rec.get("primary_votes", []):
+                lb = vote.get("label")
+                if lb and vote.get("decision") in ("accept", "borderline"):
+                    label_counts[lb] = label_counts.get(lb, 0) + 1
+            primary_label = (
+                max(label_counts, key=label_counts.get) if label_counts else "ambiguous"
+            )
+
+            # Risk flags
+            risk_flags: list[str] = []
+            if base_decision == "borderline":
+                base_decision = "accept"
+                risk_flags.append("borderline_promoted")
+            if base_decision == "accept" and vote_ratio < RISK_FLAG_THRESHOLD:
+                risk_flags.append("low_consensus")
+
+            # Build consensus record
+            consensus_record = {
+                **rec,
+                "decision": base_decision,
+                "primary_label": primary_label,
+                "candidate_modes": [primary_label] if primary_label else [],
+                "confidence": round(vote_ratio, 3),
+                "consensus": {
+                    "support": round(accept_v, 2),
+                    "oppose": round(reject_v, 2),
+                    "abstain": round(abstain_v, 2),
+                },
+                "why_accept": list(dict.fromkeys(why_accept_hints))[:5] if base_decision == "accept" else [],
+                "reject_reason": list(dict.fromkeys(reject_reason_hints))[:5] if base_decision == "reject" else [],
+                "risk_flags": risk_flags,
+                "status": "CONSENSUS_DECIDED",
+            }
+
+            f.write(json.dumps(consensus_record, ensure_ascii=False) + "\n")
+
+            if base_decision == "accept":
+                accept_count += 1
+            else:
+                reject_count += 1
+
+    log.info(
+        "Consensus built (streaming): %d accept, %d reject → %s",
+        accept_count, reject_count, INTER_CONSENSUS,
+    )
+    return INTER_CONSENSUS

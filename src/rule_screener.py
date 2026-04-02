@@ -14,6 +14,7 @@ Reject criteria (applied in order; first match wins):
   R6  Looks like a code token (__dunder__, camelCase with digits, hex literal)
   R7  Pure numeric string
   R8  Repeating single character (aaaa, !!!!!)
+  R9  Generic grammatical words (pronouns, articles, conjunctions, prepositions, auxiliary verbs)
 
 Pre-accept criteria (fast-path into AI review with pass_reason noted):
   P1  Matches a known SaaS-friendly word pattern (purely optional hint)
@@ -44,6 +45,53 @@ CODE_DUNDER_RE = re.compile(r"^__\w+__$")
 CODE_HEX_RE = re.compile(r"^0x[0-9a-fA-F]+$")
 CODE_CAMEL_DIGIT_RE = re.compile(r"[a-z][A-Z].*\d|\d.*[a-z][A-Z]")
 REPEAT_CHAR_RE = re.compile(r"^(.)\1{3,}$")  # same char repeated 4+ times
+
+# Generic grammatical words that are clearly not SaaS-appropriate
+GENERIC_WORDS = {
+    # Pronouns
+    "i", "me", "my", "mine", "myself",
+    "you", "your", "yours", "yourself", "yourselves",
+    "he", "him", "his", "himself",
+    "she", "her", "hers", "herself",
+    "it", "its", "itself",
+    "we", "us", "our", "ours", "ourselves",
+    "they", "them", "their", "theirs", "themselves",
+    "this", "that", "these", "those",
+    "who", "what", "where", "when", "why", "how", "which", "whose", "whom",
+    # Articles
+    "the", "a", "an",
+    # Conjunctions
+    "and", "but", "or", "nor", "for", "yet", "so", "although", "because", "since",
+    "unless", "until", "while", "where", "whereas", "whether", "if", "then", "else",
+    # Prepositions
+    "of", "in", "on", "at", "to", "for", "with", "by", "from", "up", "about",
+    "into", "over", "after", "under", "out", "through", "during", "before",
+    "between", "against", "without", "within", "among", "around", "behind",
+    "beyond", "plus", "except", "per", "via",
+    # Common auxiliary/modal verbs (high-frequency, low SaaS value)
+    "is", "am", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "having",
+    "do", "does", "did", "doing",
+    "can", "could", "will", "would", "shall", "should", "may", "might", "must",
+    "get", "got", "let", "put", "say", "see", "go", "come", "take", "make",
+    # Other high-frequency function words
+    "not", "no", "yes", "all", "some", "any", "each", "every", "both", "neither",
+    "either", "such", "same", "other", "another", "else", "just", "only", "very",
+    "also", "too", "well", "now", "then", "here", "there", "when", "where", "how",
+    "mr", "mrs", "ms", "dr", "prof",
+}
+
+# Profanity and offensive words (clearly inappropriate for SaaS branding)
+PROFANITY_WORDS = {
+    "fuck", "shit", "damn", "hell", "bitch", "bastard", "ass", "dick", "piss",
+    "cock", "pussy", "whore", "slut", "crap", "suck", "sucks", "blow", "blows",
+    # Spanish profanity
+    "carajo", "mierda", "joder", "coño", "puto", "puta", "polla", "pendejo",
+    "chingar", "chingado", "pinche", "verga", "hijueputa", "culero", "maricón",
+    # Additional offensive terms
+    "nigger", "nigga", "faggot", "fag", "retard", "rape", "kill", "murder",
+    "nazi", "hitler", "suicide", "terrorist", "bomb",
+}
 
 
 def _alpha_ratio(s: str) -> float:
@@ -92,6 +140,14 @@ def screen_token(word: str) -> tuple[str, str | None]:
     # R8 – repeating single char
     if REPEAT_CHAR_RE.match(word):
         return "reject", "repeat_char"
+
+    # R9 – generic grammatical words (case-insensitive)
+    if word.lower() in GENERIC_WORDS:
+        return "reject", "generic_word"
+
+    # R10 – profanity and offensive words (case-insensitive)
+    if word.lower() in PROFANITY_WORDS:
+        return "reject", "profanity"
 
     return "pass", None
 

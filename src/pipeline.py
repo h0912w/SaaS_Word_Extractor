@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     INTER_CONSENSUS,
     INTER_REBUTTED,
+    INTER_LOADED,
     INTER_SCREENED,
     OUTPUT_DIR,
     INTERMEDIATE_DIR,
@@ -55,124 +56,251 @@ def _ensure_dirs():
 # Phase: prep  (Steps 1-4)
 # ---------------------------------------------------------------------------
 
-def phase_prep(resume: bool = False, max_words: int = 0):
+def phase_prep(resume: bool = False, max_words: int = 0, enable_memory_monitor: bool = True):
     log.info("=" * 60)
     log.info("Phase: PREP  (Steps 1-4)")
     log.info("=" * 60)
     _ensure_dirs()
 
-    import input_discovery
-    import input_loader
+    # Start memory monitoring
+    monitor = None
+    if enable_memory_monitor:
+        try:
+            from memory_monitor import MemoryMonitor
+            monitor = MemoryMonitor(threshold_mb=7000, phase_name="PREP (Steps 1-4)")
+            monitor.start()
+        except ImportError:
+            log.warning("memory_monitor module not available, skipping memory monitoring")
+
+    try:
+        import input_discovery
+        import input_loader
+        import token_normalizer
+        import rule_screener
+
+        # Step 1
+        log.info("[Step 1] Input file discovery")
+        file_descriptors = input_discovery.run(resume=resume)
+        supported = [f for f in file_descriptors if f.get("supported")]
+        log.info("  %d supported file(s) found", len(supported))
+
+        # Step 2
+        log.info("[Step 2] Loading files (streaming mode)")
+        # Don't load into memory - just process to file directly
+        input_loader.run(file_descriptors, resume=resume, max_lines=max_words)
+        log.info("  Loaded tokens written to file")
+
+        # Step 3+4: Process normalization and screening in streaming mode
+        log.info("[Step 3-4] Normalization and screening (streaming mode)")
+        _normalize_and_screen_streaming(monitor)
+
+        log.info("")
+        log.info("Prep phase complete (streaming mode).")
+        log.info("Next: Run AI review phase")
+
+        return INTER_SCREENED  # Return path instead of data
+    finally:
+        if monitor:
+            monitor.stop()
+
+
+def _normalize_and_screen_streaming(monitor=None):
+    """Process normalization and screening in streaming mode to avoid memory spike."""
     import token_normalizer
     import rule_screener
 
-    # Step 1
-    log.info("[Step 1] Input file discovery")
-    file_descriptors = input_discovery.run(resume=resume)
-    supported = [f for f in file_descriptors if f.get("supported")]
-    log.info("  %d supported file(s) found", len(supported))
+    INTER_SCREENED.parent.mkdir(parents=True, exist_ok=True)
+    if INTER_SCREENED.exists():
+        INTER_SCREENED.unlink()
 
-    # Step 2
-    log.info("[Step 2] Loading files")
-    loaded = input_loader.run(file_descriptors, resume=resume, max_lines=max_words)
-    log.info("  %d raw tokens loaded", len(loaded))
+    seen_words = set()
+    passed_count = 0
+    rejected_count = 0
 
-    # Step 3
-    log.info("[Step 3] Token normalization + underscore splitting")
-    normalized = token_normalizer.run(loaded, resume=resume)
-    log.info("  %d unique normalized words", len(normalized))
+    # Stream from loaded tokens
+    from utils import iter_jsonl
+    total_processed = 0
 
-    # Step 4
-    log.info("[Step 4] Rule-based screening")
-    passed, rule_rejected = rule_screener.run(normalized, resume=resume)
-    log.info("  %d passed  |  %d rule-rejected", len(passed), len(rule_rejected))
+    for rec in iter_jsonl(INTER_LOADED):
+        total_processed += 1
 
-    log.info("")
-    log.info("Prep phase complete.")
-    log.info("Next: Claude Code 세션이 Steps 5-7 AI 판정을 수행해야 합니다.")
-    log.info("  Input  : %s", INTER_SCREENED)
-    log.info("  Output : output/intermediate/05_primary_reviewed.jsonl")
-    log.info("           output/intermediate/06_challenged.jsonl")
-    log.info("           output/intermediate/07_rebutted.jsonl")
-    log.info("After Steps 5-7: python src/pipeline.py --phase consensus")
+        # Check memory if monitor is enabled
+        if monitor and total_processed % 10000 == 0:
+            if not monitor.check():
+                log.warning("Memory threshold reached, halting...")
+                break
 
-    return passed, rule_rejected
+        # Normalize
+        normalized = token_normalizer.normalize_raw(rec["raw_token"])[0]
+        words = token_normalizer.split_to_words(normalized)
+
+        for word in words:
+            if word in seen_words:
+                continue
+            seen_words.add(word)
+
+            # Screen
+            result, reason = rule_screener.screen_token(word)
+
+            updated = {
+                **rec,
+                "normalized_word": word,
+                "transformations": rec.get("transformations", []) + ["split_underscore"],
+                "normalization_flag": "split_from_phrase",
+                "screen_result": result,
+                "screen_reason": reason,
+                "status": "SCREENED",
+            }
+
+            from utils import append_jsonl
+            append_jsonl(INTER_SCREENED, updated)
+
+            if result == "pass":
+                passed_count += 1
+            else:
+                rejected_count += 1
+
+        # Progress reporting
+        if total_processed % 100000 == 0:
+            log.info("  Processed %d tokens...", total_processed)
+            import gc
+            gc.collect()
+
+    log.info("  Total processed: %d", total_processed)
+    log.info("  Passed: %d, Rejected: %d", passed_count, rejected_count)
 
 
 # ---------------------------------------------------------------------------
 # Phase: consensus  (Step 8 — algorithmic vote aggregation)
 # ---------------------------------------------------------------------------
 
-def phase_consensus(resume: bool = False):
+def phase_consensus(resume: bool = False, enable_memory_monitor: bool = True):
     log.info("=" * 60)
-    log.info("Phase: CONSENSUS  (Step 8)")
+    log.info("Phase: CONSENSUS  (Step 8) - Streaming Mode")
     log.info("=" * 60)
 
-    if resume and INTER_CONSENSUS.exists():
-        log.info("Resuming — %s already exists, skipping.", INTER_CONSENSUS)
-        from utils import read_jsonl
-        return read_jsonl(INTER_CONSENSUS)
+    # Start memory monitoring
+    monitor = None
+    if enable_memory_monitor:
+        try:
+            from memory_monitor import MemoryMonitor
+            monitor = MemoryMonitor(threshold_mb=7000, phase_name="CONSENSUS (Step 8)")
+            monitor.start()
+        except ImportError:
+            log.warning("memory_monitor module not available, skipping memory monitoring")
 
-    import ai_review
+    try:
+        if resume and INTER_CONSENSUS.exists():
+            log.info("Resuming — %s already exists, skipping.", INTER_CONSENSUS)
+            from utils import read_jsonl
+            return read_jsonl(INTER_CONSENSUS)
 
-    log.info("[Step 8] Vote aggregation")
-    rebutted = ai_review.load_rebutted()
-    consensus = ai_review.build_consensus(rebutted)
+        import ai_review
 
-    accept_n = sum(1 for r in consensus if r["decision"] == "accept")
-    reject_n = sum(1 for r in consensus if r["decision"] == "reject")
-    log.info("  %d accept  |  %d reject", accept_n, reject_n)
-    log.info("Next: python src/pipeline.py --phase export")
-    return consensus
+        log.info("[Step 8] Vote aggregation (streaming)")
+        rebutted_iter = ai_review.iter_rebutted()
+        ai_review.build_consensus_streaming(rebutted_iter)
+
+        # Count results without loading all into memory
+        log.info("  Consensus built (streaming)")
+        log.info("Next: python src/pipeline.py --phase export")
+        return INTER_CONSENSUS
+    finally:
+        if monitor:
+            monitor.stop()
 
 
 # ---------------------------------------------------------------------------
 # Phase: export  (Steps 9-10)
 # ---------------------------------------------------------------------------
 
-def phase_export(resume: bool = False):
+def phase_export(resume: bool = False, enable_memory_monitor: bool = True):
     log.info("=" * 60)
-    log.info("Phase: EXPORT  (Steps 9-10)")
+    log.info("Phase: EXPORT  (Steps 9-10) - Streaming Mode")
     log.info("=" * 60)
     _ensure_dirs()
 
-    import ai_review
-    import result_writer
-    import human_review_exporter
-    from config import INTER_SCREENED
-    from utils import read_jsonl
+    # Start memory monitoring
+    monitor = None
+    if enable_memory_monitor:
+        try:
+            from memory_monitor import MemoryMonitor
+            monitor = MemoryMonitor(threshold_mb=7000, phase_name="EXPORT (Steps 9-10)")
+            monitor.start()
+        except ImportError:
+            log.warning("memory_monitor module not available, skipping memory monitoring")
 
-    # Load consensus records
-    consensus = ai_review.load_rebutted()  # loads from INTER_REBUTTED
-    # Build/load consensus if not yet built
-    if not INTER_CONSENSUS.exists():
-        consensus_records = ai_review.build_consensus(consensus)
-    else:
-        consensus_records = read_jsonl(INTER_CONSENSUS)
+    try:
+        import ai_review
+        import result_writer
+        import human_review_exporter
 
-    # Load rule-rejected records (from screened file)
-    all_screened = read_jsonl(INTER_SCREENED)
-    rule_rejected = [r for r in all_screened if r.get("screen_result") == "reject"]
+        # Step 8: Build consensus if needed (streaming)
+        if not INTER_CONSENSUS.exists():
+            log.info("[Step 8] Building consensus (streaming)")
+            rebutted_iter = ai_review.iter_rebutted()
+            ai_review.build_consensus_streaming(rebutted_iter)
+        else:
+            log.info("[Step 8] Consensus already exists, skipping")
 
-    # Step 9
-    log.info("[Step 9] Writing JSONL/JSON results")
-    run_meta = {
-        "pipeline_version": PIPELINE_VERSION,
-        "export_time": datetime.datetime.utcnow().isoformat() + "Z",
-    }
-    saas_records, all_rejected = result_writer.run(
-        consensus_records, rule_rejected, run_meta
-    )
+        # Step 9: Write JSONL results (streaming)
+        log.info("[Step 9] Writing JSONL/JSON results (streaming)")
+        run_meta = {
+            "pipeline_version": PIPELINE_VERSION,
+            "export_time": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+        saas_path, rejected_path = result_writer.run_streaming(run_meta)
 
-    # Step 10
-    log.info("[Step 10] Human review XLSX/CSV export")
-    human_review_exporter.run(saas_records, all_rejected)
+        # Step 10: Human review export (streaming)
+        log.info("[Step 10] Human review XLSX/CSV export (streaming)")
+        human_review_exporter.run_streaming()
 
-    log.info("")
-    log.info("Export phase complete.")
-    log.info("Next (optional): Claude Code 세션이 Step 12 QA 판정을 수행합니다.")
-    log.info("After QA judgment: python src/pipeline.py --phase qa")
-    return saas_records, all_rejected
+        # Auto-run QA after export completes
+        log.info("")
+        log.info("[Auto QA] Running QA analysis after export...")
+        _run_auto_qa()
+
+        log.info("")
+        log.info("Export phase complete (streaming mode).")
+        log.info("Next (optional): Claude Code 세션이 Step 12 QA 판정을 수행합니다.")
+        log.info("After QA judgment: python src/pipeline.py --phase qa")
+        return saas_path, rejected_path
+    finally:
+        if monitor:
+            monitor.stop()
+
+
+def _run_auto_qa():
+    """Automatically run QA analysis after export completes."""
+    try:
+        import subprocess
+        import sys
+
+        log.info("Executing QA analyzer...")
+        result = subprocess.run(
+            [sys.executable, "src/qa_analyzer.py"],
+            cwd=Path(__file__).parent.parent,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minutes timeout
+        )
+
+        if result.returncode == 0:
+            log.info("Auto QA completed successfully.")
+            # Print QA summary
+            for line in result.stdout.split("\n"):
+                if "Final Verdict" in line or "Total Checks" in line or "Passed" in line or "Failed" in line:
+                    log.info("  QA: %s", line)
+        else:
+            log.warning("Auto QA failed with return code %d", result.returncode)
+            if result.stderr:
+                log.warning("QA errors: %s", result.stderr[:500])
+    except FileNotFoundError:
+        log.warning("QA analyzer not found, skipping auto QA")
+    except subprocess.TimeoutExpired:
+        log.warning("Auto QA timed out after 5 minutes")
+    except Exception as exc:
+        log.warning("Auto QA failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -210,17 +338,24 @@ def main():
                         help="중간 파일이 있으면 해당 단계 재사용")
     parser.add_argument("--max-words", type=int, default=0,
                         help="prep 단계 처리 단어 수 제한 (테스트용, 0=무제한)")
+    parser.add_argument("--enable-memory-monitor", action="store_true", default=True,
+                        help="Enable memory monitoring (default: True)")
+    parser.add_argument("--disable-memory-monitor", action="store_true",
+                        help="Disable memory monitoring")
     args = parser.parse_args()
 
     start = datetime.datetime.utcnow()
 
+    # Determine if memory monitoring should be enabled
+    enable_memory_monitor = args.enable_memory_monitor and not args.disable_memory_monitor
+
     try:
         if args.phase == "prep":
-            phase_prep(resume=args.resume, max_words=args.max_words)
+            phase_prep(resume=args.resume, max_words=args.max_words, enable_memory_monitor=enable_memory_monitor)
         elif args.phase == "consensus":
-            phase_consensus(resume=args.resume)
+            phase_consensus(resume=args.resume, enable_memory_monitor=enable_memory_monitor)
         elif args.phase == "export":
-            phase_export(resume=args.resume)
+            phase_export(resume=args.resume, enable_memory_monitor=enable_memory_monitor)
         elif args.phase == "qa":
             phase_qa()
     except KeyboardInterrupt:

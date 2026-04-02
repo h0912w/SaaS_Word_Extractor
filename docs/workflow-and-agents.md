@@ -93,9 +93,11 @@
   - `rebuttal-reviewer-02`
   - `rebuttal-reviewer-03`
 
-### 단계 8. 합의 기반 최종 결정
+### 단계 8. 합의 기반 최종 결정 (Streaming Mode)
 - 목적: 단계 4~7 결과 종합
-- 코드: `consensus-engine`
+- 코드: `consensus-engine` (streaming)
+- 실행 방식: **Streaming 모드** - 한 레코드씩 처리하여 메모리 사용량 최적화
+- 메모리 최적화: 전체 데이터를 메모리에 로드하지 않고 순차 처리
 - AI 판정:
   - `consensus-aggregator-primary`
   - `consensus-aggregator-recall-guardian`
@@ -186,3 +188,34 @@ Claude Code 세션 (오케스트레이터)
 
 에이전트 명세는 `.claude/agents/<agent-id>.md` 파일에 정의한다.
 Python 스크립트가 `anthropic` 패키지를 직접 임포트하여 API를 호출하는 패턴은 **금지**.
+
+## 7. QA 실행 원칙
+
+### 7.1 QA 항상 전체 파이프라인 실행
+QA는 **항상 파이프라인의 처음부터 실행**해야 한다.
+
+- 중간 단계부터 재개하면 안 된다
+- 모든 QA 실행은 중간 산출물을 삭제하고 처음부터 시작한다
+- 이는 전체 파이프라인의 무결성을 검증하기 위함이다
+
+### 7.2 QA 실행 방법
+```bash
+# 전체 파이프라인 QA (처음부터 끝까지)
+python src/qa_full_pipeline.py
+
+# 제한된 단어 수로 QA 테스트
+python src/qa_full_pipeline.py --max-words 10000
+
+# 메모리 제한 설정
+python src/qa_full_pipeline.py --max-memory-mb 4096
+```
+
+### 7.3 QA 단계별 메모리 모니터링
+QA 실행 중 각 단계마다 메모리 사용량을 모니터링한다:
+- Prep: 입력 탐색 → 로드 → 정규화 → 규칙 스크리닝
+- Primary Review: AI 1차 판정
+- Challenge Review: 반대검토
+- Rebuttal Review: 재반백
+- Consensus: 합의 집계 (**streaming 모드**로 메모리 최적화)
+- Export: 결과 저장 + 자동 QA
+- QA Analysis: 최종 QA 리포트 생성

@@ -72,6 +72,44 @@ def iter_jsonl(path: Path) -> Iterator[dict]:
                     pass
 
 
+def stream_jsonl_write(path: Path, records: Iterator[dict]) -> int:
+    """Stream write records from an iterator to a JSONL file. Returns count written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with open(path, "w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            count += 1
+    return count
+
+
+def iter_jsonl_filter(path: Path, predicate: callable) -> Iterator[dict]:
+    """
+    Stream JSONL, yielding only records matching predicate function.
+    Example: iter_jsonl_filter(path, lambda r: r.get("status") == "pass")
+    """
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    rec = json.loads(line)
+                    if predicate(rec):
+                        yield rec
+                except json.JSONDecodeError:
+                    pass
+
+
+def count_jsonl(path: Path) -> int:
+    """Count records in a JSONL file (streaming, memory-efficient)."""
+    count = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
 def write_json(path: Path, data: Any) -> None:
     """Write a dict/list to a pretty-printed JSON file."""
     path.parent.mkdir(parents=True, exist_ok=True)

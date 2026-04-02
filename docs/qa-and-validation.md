@@ -5,6 +5,7 @@
 - QA는 실제 사용자와 동일한 진입점과 동일한 파이프라인을 실행한다.
 - QA 결과도 단일 판단에 의존하지 않고 다중 에이전트가 검토한다.
 - QA는 형식 검증 + 의미 검증 둘 다 포함한다.
+- **코드 수정 시 자동으로 QA가 실행된다.**
 
 ## 2. 단계별 검증 기준
 | 단계 | 성공 기준 | 검증 방법 | 실패 시 처리 |
@@ -34,3 +35,71 @@
 - 경계 사례에서 과다 reject 징후 없음
 - 명백한 노이즈 과다 유입 없음
 - 다중 QA 검토 결과 치명적 결함 없음
+
+## 5. QA 실행 정책
+
+### 5.1 QA 항상 전체 파이프라인 실행 원칙
+**QA는 항상 파이프라인의 처음부터 실행해야 한다.**
+
+- QA는 중간 단계부터 재개하면 안 된다
+- 모든 QA 실행은 중간 산출물을 삭제하고 처음부터 시작해야 한다
+- 이는 전체 파이프라인의 무결성을 검증하기 위함이다
+
+### 5.2 QA 실행 명령
+
+```bash
+# 전체 파이프라인 QA (처음부터 끝까지)
+python src/qa_full_pipeline.py
+
+# 제한된 단어 수로 QA 테스트
+python src/qa_full_pipeline.py --max-words 10000
+
+# 메모리 제한 설정 (MB 단위, 기본 8192MB = 8GB)
+python src/qa_full_pipeline.py --max-memory-mb 4096
+```
+
+### 5.3 QA 단계별 상세
+QA 전체 파이프라인은 다음 단계를 순서대로 실행한다:
+
+1. **Cleanup**: 모든 중간/출력 파일 삭제
+2. **Prep (Steps 1-4)**: 입력 탐색 → 로드 → 정규화 → 규칙 스크리닝
+3. **Primary Review (Step 5)**: AI 1차 판정
+4. **Challenge Review (Step 6)**: 반대검토
+5. **Rebuttal Review (Step 7)**: 재반백
+6. **Consensus (Step 8)**: 합의 집계 (streaming 모드)
+7. **Export (Steps 9-10)**: 결과 저장 + 자동 QA
+8. **QA Analysis**: 최종 QA 리포트 생성
+
+### 5.4 메모리 모니터링
+QA 실행 중 메모리 사용량을 모니터링한다:
+
+- 각 단계마다 메모리 사용량을 출력한다
+- 기본 메모리 제한: 8192MB (8GB)
+- 제한 초과 시 경고를 출력하고 계속 진행 여부를 결정한다
+- Consensus 단계는 streaming 모드를 사용하여 메모리 사용량을 최적화한다
+
+### 5.5 코드 수정 시 자동 QA
+코드가 수정되면 전체 QA를 다시 실행해야 한다:
+
+1. **Python 코드 수정**: `src/` 디렉토리의 `.py` 파일이 수정되면
+2. **전체 QA 재실행**: `python src/qa_full_pipeline.py`를 실행한다
+3. **QA 결과 확인**: QA 리포트가 `output/qa/qa_report.json`에 생성된다
+
+### 5.4 Hook 설정 (settings.json)
+코드 수정 시 자동 QA를 위해 settings.json에 다음 hook이 설정된다:
+
+```json
+{
+  "hooks": {
+    "postEditHook": "python src/qa_analyzer.py"
+  }
+}
+```
+
+### 5.5 QA 결과 확인
+QA 결과는 다음 위치에서 확인할 수 있다:
+
+- `output/qa/qa_report.json` - 전체 QA 리포트
+- `output/qa/qa_findings.jsonl` - QA 발견 사항
+- `output/qa/qa_chief_verdict.json` - 최종 판정
+- `output/qa/qa_human_review.xlsx` - 사람 검토용 엑셀

@@ -12,6 +12,7 @@ Output:
 
 import csv
 import json
+from collections import Counter
 from pathlib import Path
 
 import openpyxl
@@ -19,12 +20,14 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 from config import (
+    OUT_REJECTED_WORDS,
     OUT_REJECTED_REVIEW_XLSX,
+    OUT_SAAS_WORDS,
     OUT_SAAS_REVIEW_CSV,
     OUT_SAAS_REVIEW_XLSX,
     PIPELINE_VERSION,
 )
-from utils import get_logger
+from utils import get_logger, iter_jsonl
 
 log = get_logger("human_review_exporter")
 
@@ -228,3 +231,157 @@ def run(saas_records: list[dict], rejected_records: list[dict]) -> None:
     export_saas_review(saas_records)
     export_rejected_review(rejected_records)
     log.info("Human review export complete.")
+
+
+# ---------------------------------------------------------------------------
+# Streaming variants (memory-efficient)
+# ---------------------------------------------------------------------------
+
+def _write_sheet_streaming(ws, source_path: Path, cols: list[str],
+                          filter_fn: callable = None, highlight_risk: bool = False):
+    """Write worksheet by streaming through source file."""
+    # Header
+    ws.append(cols)
+    _style_header_only(ws)
+
+    # Data rows (streaming)
+    with open(source_path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if filter_fn and not filter_fn(rec):
+                continue
+            row = _flatten_record(rec, cols)
+            ws.append(row)
+
+            # Highlight borderline/risky rows
+            if highlight_risk:
+                flags = rec.get("risk_flags", [])
+                priority = _review_priority(rec)
+                if flags and priority == "high":
+                    for cell in ws[ws.max_row]:
+                        cell.fill = _RISK_FILL
+                elif priority == "medium":
+                    for cell in ws[ws.max_row]:
+                        cell.fill = _BORDER_FILL
+
+    _style_sheet(ws, cols)
+
+
+def _style_header_only(ws):
+    """Apply header style only (for streaming write where data comes after)."""
+    for cell in ws[1]:
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = Alignment(wrap_text=False, vertical="center")
+    ws.freeze_panes = "A2"
+
+
+def _write_summary_sheet_streaming(ws, saas_path: Path, rejected_path: Path):
+    """Write summary sheet by streaming through files for statistics."""
+    ws.append(["Metric", "Value"])
+    _style_header_only(ws)
+
+    label_dist = Counter()
+    risk_dist = Counter()
+    total_accepted = 0
+
+    # Stream saas_words
+    with open(saas_path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            total_accepted += 1
+            label_dist[rec.get("primary_label", "unknown")] += 1
+            for flag in rec.get("risk_flags", []):
+                risk_dist[flag] += 1
+
+    # Count rejected
+    total_rejected = 0
+    with open(rejected_path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                total_rejected += 1
+
+    data = [
+        ("Total accepted", total_accepted),
+        ("Total rejected", total_rejected),
+        ("Pipeline version", PIPELINE_VERSION),
+        ("", ""),
+        ("--- Label distribution ---", ""),
+    ] + [(f"  label={k}", v) for k, v in sorted(label_dist.items())] + [
+        ("", ""),
+        ("--- Risk flags ---", ""),
+    ] + [(f"  flag={k}", v) for k, v in sorted(risk_dist.items())]
+
+    for row in data:
+        ws.append(list(row))
+
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 20
+
+
+def export_saas_review_streaming() -> None:
+    """Write saas_words_review.xlsx and saas_words_review.csv (streaming)."""
+    wb = openpyxl.Workbook()
+
+    # Sheet 1: accepted_words (streaming)
+    ws_acc = wb.active
+    ws_acc.title = "accepted_words"
+    _write_sheet_streaming(ws_acc, OUT_SAAS_WORDS, ACCEPTED_COLS,
+                          filter_fn=lambda r: not r.get("risk_flags"))
+
+    # Sheet 2: borderline_words (streaming)
+    ws_brd = wb.create_sheet("borderline_words")
+    _write_sheet_streaming(ws_brd, OUT_SAAS_WORDS, ACCEPTED_COLS,
+                          filter_fn=lambda r: bool(r.get("risk_flags")),
+                          highlight_risk=True)
+
+    # Sheet 3: rejected_words placeholder
+    ws_rej = wb.create_sheet("rejected_words")
+    ws_rej.append(["(see rejected_words_review.xlsx for full reject list)"])
+
+    # Sheet 4: summary (streaming)
+    ws_sum = wb.create_sheet("summary")
+    _write_summary_sheet_streaming(ws_sum, OUT_SAAS_WORDS, OUT_REJECTED_WORDS)
+
+    # Sheet 5: qa_findings placeholder
+    ws_qa = wb.create_sheet("qa_findings")
+    ws_qa.append(["(QA findings will be populated after QA run)"])
+
+    OUT_SAAS_REVIEW_XLSX.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(OUT_SAAS_REVIEW_XLSX)
+    log.info("Wrote %s", OUT_SAAS_REVIEW_XLSX)
+
+    # CSV export (streaming)
+    with open(OUT_SAAS_REVIEW_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(ACCEPTED_COLS)
+        with open(OUT_SAAS_WORDS, encoding="utf-8") as src:
+            for line in src:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                writer.writerow(_flatten_record(rec, ACCEPTED_COLS))
+    log.info("Wrote %s", OUT_SAAS_REVIEW_CSV)
+
+
+def export_rejected_review_streaming() -> None:
+    """Write rejected_words_review.xlsx (streaming)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "rejected_words"
+    _write_sheet_streaming(ws, OUT_REJECTED_WORDS, REJECTED_COLS)
+
+    OUT_REJECTED_REVIEW_XLSX.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(OUT_REJECTED_REVIEW_XLSX)
+    log.info("Wrote %s", OUT_REJECTED_REVIEW_XLSX)
+
+
+def run_streaming() -> None:
+    """Streaming version: Generate XLSX/CSV by streaming through input files."""
+    export_saas_review_streaming()
+    export_rejected_review_streaming()
+    log.info("Human review export complete (streaming).")

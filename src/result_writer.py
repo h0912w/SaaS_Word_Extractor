@@ -264,23 +264,17 @@ def run_streaming(run_meta: dict | None = None) -> tuple[Path, Path]:
                 rej_f.write(json.dumps(rej_rec, ensure_ascii=False) + "\n")
                 ai_reject_count += 1
 
-    # Add rule-rejected records (streaming from INTER_SCREENED)
-    rule_reject_count = 0
-    with open(rejected_path, "a", encoding="utf-8") as f:
-        for rec in iter_jsonl_filter(INTER_SCREENED,
-                                    lambda r: r.get("screen_result") == "reject"):
-            rule_rec = _build_reject_record(rec, [rec.get("screen_reason", "rule_screened")])
-            _validate_schema(rule_rec, REQUIRED_REJECT_FIELDS, "rejected")
-            f.write(json.dumps(rule_rec, ensure_ascii=False) + "\n")
-            rule_reject_count += 1
+    # Note: Rule-rejected records are already included in INTER_CONSENSUS
+    # They were processed through primary review with reject votes
+    # No need to separately process from INTER_SCREENED (which may be deleted)
 
     log.info("Wrote %d SaaS words → %s", saas_count, saas_path)
-    log.info("Wrote %d AI rejected + %d rule rejected → %s",
-             ai_reject_count, rule_reject_count, rejected_path)
+    log.info("Wrote %d rejected words → %s", ai_reject_count, rejected_path)
 
     # Pass 2: Collect statistics (streaming through output files we just wrote)
+    # rule_reject_count is now 0 since rule-rejected are included in ai_reject_count
     _write_run_summary_streaming(saas_path, rejected_path, run_meta,
-                                saas_count, ai_reject_count, rule_reject_count)
+                                saas_count, ai_reject_count, 0)
 
     return saas_path, rejected_path
 

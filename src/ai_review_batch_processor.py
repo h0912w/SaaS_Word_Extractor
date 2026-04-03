@@ -596,8 +596,12 @@ def _run_pipeline(monitor=None, max_words=0):
 
     # Clear output files if they exist
     if INTER_PRIMARY.exists():
-        INTER_PRIMARY.unlink()
-        log.info("Cleared existing: %s", INTER_PRIMARY)
+        try:
+            INTER_PRIMARY.unlink()
+            log.info("Cleared existing: %s", INTER_PRIMARY)
+        except PermissionError:
+            log.warning("Cannot clear existing file (locked): %s", INTER_PRIMARY)
+            log.warning("Will append to existing file instead")
 
     accept_count = 0
     reject_count = 0
@@ -691,14 +695,26 @@ def _run_pipeline(monitor=None, max_words=0):
              total_count, accept_count, reject_count, borderline_count, skipped_rejected)
     log.info("Saved to: %s", INTER_PRIMARY)
 
+    # Clean up input file to save disk space
+    if INTER_SCREENED.exists():
+        try:
+            INTER_SCREENED.unlink()
+            log.info("Cleaned up input: %s (freed disk space)", INTER_SCREENED)
+        except PermissionError:
+            log.warning("Cannot clean up input file (locked): %s", INTER_SCREENED)
+
     # Phase 2: Challenge Review (streaming)
     log.info("")
     log.info("PHASE 2: CHALLENGE REVIEW")
     log.info("-" * 60)
 
     if INTER_CHALLENGED.exists():
-        INTER_CHALLENGED.unlink()
-        log.info("Cleared existing: %s", INTER_CHALLENGED)
+        try:
+            INTER_CHALLENGED.unlink()
+            log.info("Cleared existing: %s", INTER_CHALLENGED)
+        except PermissionError:
+            log.warning("Cannot clear existing file (locked): %s", INTER_CHALLENGED)
+            log.warning("Will append to existing file instead")
 
     challenges_issued = 0
     total_count = 0
@@ -739,14 +755,26 @@ def _run_pipeline(monitor=None, max_words=0):
     log.info("Challenge review complete: %d total, %d challenges issued", total_count, challenges_issued)
     log.info("Saved to: %s", INTER_CHALLENGED)
 
+    # Clean up input file to save disk space
+    if INTER_PRIMARY.exists():
+        try:
+            INTER_PRIMARY.unlink()
+            log.info("Cleaned up input: %s (freed disk space)", INTER_PRIMARY)
+        except PermissionError:
+            log.warning("Cannot clean up input file (locked): %s", INTER_PRIMARY)
+
     # Phase 3: Rebuttal Review (streaming)
     log.info("")
     log.info("PHASE 3: REBUTTAL REVIEW")
     log.info("-" * 60)
 
     if INTER_REBUTTED.exists():
-        INTER_REBUTTED.unlink()
-        log.info("Cleared existing: %s", INTER_REBUTTED)
+        try:
+            INTER_REBUTTED.unlink()
+            log.info("Cleared existing: %s", INTER_REBUTTED)
+        except PermissionError:
+            log.warning("Cannot clear existing file (locked): %s", INTER_REBUTTED)
+            log.warning("Will append to existing file instead")
 
     total_count = 0
 
@@ -797,6 +825,14 @@ def _run_pipeline(monitor=None, max_words=0):
 
     log.info("Rebuttal review complete: %d total records", total_count)
     log.info("Saved to: %s", INTER_REBUTTED)
+
+    # Clean up input file to save disk space
+    if INTER_CHALLENGED.exists():
+        try:
+            INTER_CHALLENGED.unlink()
+            log.info("Cleaned up input: %s (freed disk space)", INTER_CHALLENGED)
+        except PermissionError:
+            log.warning("Cannot clean up input file (locked): %s", INTER_CHALLENGED)
 
     log.info("")
     log.info("AI review complete!")

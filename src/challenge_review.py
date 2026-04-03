@@ -145,7 +145,7 @@ def process_file(input_path: Path, output_path: Path) -> Dict[str, int]:
         'borderline_challenges': 0
     }
 
-    with open(input_path, 'r', encoding='utf-8') as infile, \
+    with open(input_path, 'r', encoding='utf-8', errors='ignore') as infile, \
          open(output_path, 'w', encoding='utf-8') as outfile:
 
         for line_num, line in enumerate(infile, 1):
@@ -208,7 +208,7 @@ def process_file(input_path: Path, output_path: Path) -> Dict[str, int]:
 def main():
     """Main execution."""
     base_dir = Path('C:/Users/h0912/claude_project/SaaS_Word_Extractor')
-    input_path = base_dir / 'output' / 'intermediate' / '05_primary_reviewed.jsonl'
+    input_path = base_dir / 'output' / 'intermediate' / '05_primary_reviewed_new.jsonl'
     output_path = base_dir / 'output' / 'intermediate' / '06_challenged.jsonl'
 
     if not input_path.exists():

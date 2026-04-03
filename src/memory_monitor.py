@@ -59,7 +59,7 @@ class MemoryMonitor:
 
     def __init__(
         self,
-        threshold_mb: float = 7000,
+        threshold_mb: float = 2048,
         check_interval: int = 5,
         crash_dir: Optional[Path] = None,
         phase_name: str = "unknown"
@@ -223,7 +223,7 @@ class MemoryMonitor:
 
 
 def monitor_memory(
-    threshold_mb: float = 7000,
+    threshold_mb: float = 2048,
     phase_name: str = "unknown"
 ):
     """Decorator for memory monitoring."""

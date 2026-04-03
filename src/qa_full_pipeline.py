@@ -96,23 +96,44 @@ def cleanup_outputs(base_dir: Path) -> None:
     ]
 
     cleaned_count = 0
+    skipped_count = 0
+
+    # Clean directories by removing individual files
     for dir_path in dirs_to_clean:
         if dir_path.exists():
-            shutil.rmtree(dir_path)
-            print(f"  Removed directory: {dir_path}")
-            cleaned_count += 1
+            try:
+                # Try to remove individual files first
+                for item in dir_path.iterdir():
+                    try:
+                        if item.is_file():
+                            item.unlink()
+                            cleaned_count += 1
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+                            cleaned_count += 1
+                    except (PermissionError, OSError) as e:
+                        print(f"  Skipped (locked): {item.name}")
+                        skipped_count += 1
+                print(f"  Cleaned directory: {dir_path}")
+            except Exception as e:
+                print(f"  Error cleaning {dir_path}: {e}")
 
+    # Clean individual files
     for file_path in files_to_clean:
         if file_path.exists():
-            file_path.unlink()
-            print(f"  Removed file: {file_path}")
-            cleaned_count += 1
+            try:
+                file_path.unlink()
+                print(f"  Removed file: {file_path}")
+                cleaned_count += 1
+            except (PermissionError, OSError) as e:
+                print(f"  Skipped (locked): {file_path.name}")
+                skipped_count += 1
 
     # Recreate empty directories
     for dir_path in dirs_to_clean:
         dir_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"Cleanup complete: {cleaned_count} items removed")
+    print(f"Cleanup complete: {cleaned_count} items removed, {skipped_count} skipped (locked)")
 
 
 def run_command(

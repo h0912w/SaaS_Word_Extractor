@@ -67,7 +67,7 @@ def phase_prep(resume: bool = False, max_words: int = 0, enable_memory_monitor: 
     if enable_memory_monitor:
         try:
             from memory_monitor import MemoryMonitor
-            monitor = MemoryMonitor(threshold_mb=7000, phase_name="PREP (Steps 1-4)")
+            monitor = MemoryMonitor(threshold_mb=2048, phase_name="PREP (Steps 1-4)")
             monitor.start()
         except ImportError:
             log.warning("memory_monitor module not available, skipping memory monitoring")
@@ -93,6 +93,14 @@ def phase_prep(resume: bool = False, max_words: int = 0, enable_memory_monitor: 
         # Step 3+4: Process normalization and screening in streaming mode
         log.info("[Step 3-4] Normalization and screening (streaming mode)")
         _normalize_and_screen_streaming(monitor)
+
+        # Clean up loaded tokens file to save disk space
+        if INTER_LOADED.exists():
+            try:
+                INTER_LOADED.unlink()
+                log.info("  Cleaned up loaded tokens (freed disk space)")
+            except PermissionError:
+                log.warning("  Cannot clean up loaded tokens file (locked)")
 
         log.info("")
         log.info("Prep phase complete (streaming mode).")
@@ -184,7 +192,7 @@ def phase_consensus(resume: bool = False, enable_memory_monitor: bool = True):
     if enable_memory_monitor:
         try:
             from memory_monitor import MemoryMonitor
-            monitor = MemoryMonitor(threshold_mb=7000, phase_name="CONSENSUS (Step 8)")
+            monitor = MemoryMonitor(threshold_mb=2048, phase_name="CONSENSUS (Step 8)")
             monitor.start()
         except ImportError:
             log.warning("memory_monitor module not available, skipping memory monitoring")
@@ -200,6 +208,14 @@ def phase_consensus(resume: bool = False, enable_memory_monitor: bool = True):
         log.info("[Step 8] Vote aggregation (streaming)")
         rebutted_iter = ai_review.iter_rebutted()
         ai_review.build_consensus_streaming(rebutted_iter)
+
+        # Clean up rebutted file to save disk space
+        if INTER_REBUTTED.exists():
+            try:
+                INTER_REBUTTED.unlink()
+                log.info("  Cleaned up rebutted file (freed disk space)")
+            except PermissionError:
+                log.warning("  Cannot clean up rebutted file (locked)")
 
         # Count results without loading all into memory
         log.info("  Consensus built (streaming)")
@@ -225,7 +241,7 @@ def phase_export(resume: bool = False, enable_memory_monitor: bool = True):
     if enable_memory_monitor:
         try:
             from memory_monitor import MemoryMonitor
-            monitor = MemoryMonitor(threshold_mb=7000, phase_name="EXPORT (Steps 9-10)")
+            monitor = MemoryMonitor(threshold_mb=2048, phase_name="EXPORT (Steps 9-10)")
             monitor.start()
         except ImportError:
             log.warning("memory_monitor module not available, skipping memory monitoring")

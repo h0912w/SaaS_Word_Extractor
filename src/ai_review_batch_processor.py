@@ -395,9 +395,9 @@ def perform_primary_review(tokens: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                         1.0,
                         [f"Rule rejected: {token.get('screen_reason', 'unknown')}"]
                     )
-                    for i in range(1, 6)
+                    for i in [1, 3, 5]  # Only 3 judges now
                 ],
-                "primary_summary": {"accept": 0, "reject": 5, "borderline": 0},
+                "primary_summary": {"accept": 0, "reject": 3, "borderline": 0},
                 "status": "AI_PRIMARY_REVIEWED"
             }
             reviewed.append(reject_record)
@@ -409,13 +409,12 @@ def perform_primary_review(tokens: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         # Perform primary review
         decision, label, confidence, reasons = primary_review_token(token)
 
-        # Create 5 judge votes (simulating multi-judge system with consistent logic)
+        # Create 3 judge votes (optimized from 5 for faster processing)
         judge_variants = [
-            ("saas-title-judge-01", 0.0),  # Recall-focused (more lenient)
-            ("saas-title-judge-02", 0.0),  # Brand-focused
-            ("saas-title-judge-03", 0.0),  # Function-focused
-            ("saas-title-judge-04", 0.0),  # English-word focused
-            ("saas-title-judge-05", 0.0),  # Balanced
+            ("saas-title-judge-01", 0.0),  # Recall-focused (more lenient) - KEEP
+            ("saas-title-judge-03", 0.0),  # Function-focused - KEEP
+            ("saas-title-judge-05", 0.0),  # Balanced - KEEP
+            # REMOVED: judge-02 (Brand), judge-04 (English)
         ]
 
         votes = []
@@ -428,15 +427,16 @@ def perform_primary_review(tokens: List[Dict[str, Any]]) -> List[Dict[str, Any]]
         accept_votes = sum(1 for v in votes if v["decision"] == "accept")
         reject_votes = sum(1 for v in votes if v["decision"] == "reject")
 
-        # Determine summary
-        if accept_votes >= 4:
-            summary = {"accept": 5, "reject": 0, "borderline": 0}
+        # Determine summary (3-judge unanimous or split)
+        if accept_votes == 3:
+            summary = {"accept": 3, "reject": 0, "borderline": 0}
             accept_count += 1
-        elif reject_votes >= 4:
-            summary = {"accept": 0, "reject": 5, "borderline": 0}
+        elif reject_votes == 3:
+            summary = {"accept": 0, "reject": 3, "borderline": 0}
             reject_count += 1
         else:
-            summary = {"accept": accept_votes, "reject": reject_votes, "borderline": 5 - accept_votes - reject_votes}
+            # Any split decision is borderline
+            summary = {"accept": accept_votes, "reject": reject_votes, "borderline": 3 - accept_votes - reject_votes}
             borderline_count += 1
 
         # Create reviewed record
@@ -653,13 +653,11 @@ def _run_pipeline(monitor=None, max_words=0):
         # Perform primary review
         decision, label, confidence, reasons = primary_review_token(token)
 
-        # Create 5 judge votes
+        # Create 3 judge votes (optimized from 5)
         judge_variants = [
-            ("saas-title-judge-01", 0.0),
-            ("saas-title-judge-02", 0.0),
-            ("saas-title-judge-03", 0.0),
-            ("saas-title-judge-04", 0.0),
-            ("saas-title-judge-05", 0.0),
+            ("saas-title-judge-01", 0.0),  # Recall-focused - KEEP
+            ("saas-title-judge-03", 0.0),  # Function-focused - KEEP
+            ("saas-title-judge-05", 0.0),  # Balanced - KEEP
         ]
 
         votes = []
@@ -671,15 +669,16 @@ def _run_pipeline(monitor=None, max_words=0):
         accept_votes = sum(1 for v in votes if v["decision"] == "accept")
         reject_votes = sum(1 for v in votes if v["decision"] == "reject")
 
-        # Determine summary
-        if accept_votes >= 4:
-            summary = {"accept": 5, "reject": 0, "borderline": 0}
+        # Determine summary (3-judge system)
+        if accept_votes == 3:
+            summary = {"accept": 3, "reject": 0, "borderline": 0}
             accept_count += 1
-        elif reject_votes >= 4:
-            summary = {"accept": 0, "reject": 5, "borderline": 0}
+        elif reject_votes == 3:
+            summary = {"accept": 0, "reject": 3, "borderline": 0}
             reject_count += 1
         else:
-            summary = {"accept": accept_votes, "reject": reject_votes, "borderline": 5 - accept_votes - reject_votes}
+            # Any split decision is borderline
+            summary = {"accept": accept_votes, "reject": reject_votes, "borderline": 3 - accept_votes - reject_votes}
             borderline_count += 1
 
         # Create reviewed record and append

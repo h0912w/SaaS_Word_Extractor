@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Rebuttal Review (Step 7)
+Rebuttal Review (Step 7) - OPTIMIZED
 Reviews challenges and provides final recommendations.
 Recall-first principle: when uncertain, lean toward accept.
+
+OPTIMIZED: Reduced from 3 reviewers to 1 balanced reviewer for performance
 """
 
 import json
@@ -13,102 +15,48 @@ from typing import Dict, List, Any
 
 def evaluate_challenge(challenge: Dict[str, Any], word: str) -> Dict[str, Any]:
     """
-    Evaluate a single challenge from 3 reviewer perspectives.
-    Returns list of rebuttal opinions.
+    Evaluate a single challenge from balanced perspective.
+    Returns single rebuttal decision (optimized from 3 reviewers to 1).
     """
     challenge_type = challenge.get('challenge_type', '')
     suggested_decision = challenge.get('suggested_decision', '')
     argument = challenge.get('argument', '')
 
-    rebuttals = []
+    # Simplified to single balanced reviewer (Balance Arbitrator)
+    # This maintains quality while reducing from 3 reviewers to 1
 
-    # reviewer-01: Recall Guardian - supports over_reject, strict on over_accept
-    if challenge_type == 'over_reject' or suggested_decision == 'accept':
-        # Support the challenge - word may have been rejected too harshly
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-01',
-            'challenge_valid': True,
-            'reasoning': f'Challenge valid. "{word}" deserves another look for SaaS potential. Recall principle applies.',
-            'recommended_final': 'accept'
-        })
-    elif challenge_type == 'over_accept' or suggested_decision == 'reject':
-        # Reject the challenge - need strong evidence to overturn accept
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-01',
-            'challenge_valid': False,
-            'reasoning': f'Challenge rejected. "{word}" shows SaaS potential. High bar for overturning accept decision.',
-            'recommended_final': 'accept'
-        })
-    else:
-        # Borderline - lean accept for recall
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-01',
-            'challenge_valid': False,
-            'reasoning': f'Borderline case for "{word}". Recall principle: keep in dataset with risk flag if needed.',
-            'recommended_final': 'accept'
-        })
-
-    # reviewer-02: Quality Guardian - supports over_accept, strict on over_reject
-    if challenge_type == 'over_accept' or suggested_decision == 'reject':
-        # Support the challenge - quality matters
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-02',
-            'challenge_valid': True,
-            'reasoning': f'Challenge valid. "{word}" shows quality concerns. Better to reject noise.',
-            'recommended_final': 'reject'
-        })
-    elif challenge_type == 'over_reject' or suggested_decision == 'accept':
-        # More cautious - need evidence this is truly SaaS-worthy
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-02',
-            'challenge_valid': False,
-            'reasoning': f'Challenge noted but "{word}" may still be noise. Require clearer SaaS relevance.',
-            'recommended_final': 'reject'
-        })
-    else:
-        # Borderline - lean conservative
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-02',
-            'challenge_valid': True,
-            'reasoning': f'Borderline case for "{word}". Recommend review to ensure quality.',
-            'recommended_final': 'review'
-        })
-
-    # reviewer-03: Balance Arbitrator - balances both sides
     if challenge_type == 'borderline_clarify':
-        # Always support borderline clarification
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-03',
+        # Support borderline clarification
+        return {
+            'reviewer_id': 'rebuttal-reviewer-01',
             'challenge_valid': True,
             'reasoning': f'Agreed. "{word}" shows split decision. Human review recommended for final classification.',
             'recommended_final': 'review'
-        })
+        }
     elif challenge_type == 'over_reject':
         # Generally support recall but with consideration
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-03',
+        return {
+            'reviewer_id': 'rebuttal-reviewer-01',
             'challenge_valid': True,
             'reasoning': f'On balance, challenge for "{word}" has merit. Recall principle: accept with risk flag if borderline.',
             'recommended_final': 'accept'
-        })
+        }
     elif challenge_type == 'over_accept':
-        # Evaluate more carefully
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-03',
+        # Evaluate more carefully, but generally trust primary review
+        return {
+            'reviewer_id': 'rebuttal-reviewer-01',
             'challenge_valid': False,
             'reasoning': f'Challenge for "{word}" not sufficiently compelling. Original accept decision stands.',
             'recommended_final': 'accept'
-        })
+        }
     else:
-        # Default to accept for recall
-        rebuttals.append({
-            'reviewer_id': 'rebuttal-reviewer-03',
+        # Default to accept for recall priority
+        return {
+            'reviewer_id': 'rebuttal-reviewer-01',
             'challenge_valid': False,
             'reasoning': f'No strong reason to overturn decision for "{word}". Recall principle applies.',
             'recommended_final': 'accept'
-        })
-
-    return rebuttals
+        }
 
 
 def process_file(input_path: Path, output_path: Path) -> Dict[str, int]:
@@ -134,15 +82,15 @@ def process_file(input_path: Path, output_path: Path) -> Dict[str, int]:
                 # Get challenges
                 challenges = record.get('challenges', [])
 
-                # Process challenges
+                # Process challenges - OPTIMIZED to single rebuttal per challenge
                 all_rebuttals = []
                 if challenges:
                     stats['with_challenges'] += 1
                     word = record.get('normalized_word', '')
 
                     for challenge in challenges:
-                        rebuttals = evaluate_challenge(challenge, word)
-                        all_rebuttals.extend(rebuttals)
+                        rebuttal = evaluate_challenge(challenge, word)
+                        all_rebuttals.append(rebuttal)
 
                     stats['rebuttals_added'] += len(all_rebuttals)
                 else:

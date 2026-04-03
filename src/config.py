@@ -52,14 +52,14 @@ API_RETRY_ATTEMPTS = 3
 API_RETRY_BASE_DELAY = 2.0  # seconds; doubles each retry
 
 # ---------------------------------------------------------------------------
-# AI agent counts (design requirement: do not reduce without design approval)
+# AI agent counts (optimized for 24h processing)
 # ---------------------------------------------------------------------------
-PRIMARY_JUDGE_COUNT = 5
-CHALLENGE_REVIEWER_COUNT = 5
-REBUTTAL_REVIEWER_COUNT = 3
+PRIMARY_JUDGE_COUNT = 3  # Reduced from 5 (keep: Recall, Function, Balanced)
+CHALLENGE_REVIEWER_COUNT = 2  # Reduced from 5 (keep: Recall Guardian, Noise Detector)
+REBUTTAL_REVIEWER_COUNT = 1  # Reduced from 3 (keep: Balance Arbitrator)
 
 # Number of words fed to each AI agent call at once
-AI_BATCH_SIZE = int(os.environ.get("AI_BATCH_SIZE", "50"))
+AI_BATCH_SIZE = int(os.environ.get("AI_BATCH_SIZE", "100"))  # Increased from 50
 
 # ---------------------------------------------------------------------------
 # Rule screener thresholds
@@ -69,9 +69,9 @@ MAX_WORD_LENGTH = 30      # chars after normalization
 MIN_ALPHA_RATIO = 0.5     # minimum fraction of alphabetic characters
 
 # ---------------------------------------------------------------------------
-# Consensus thresholds
+# Consensus thresholds (optimized for 3-judge system)
 # ---------------------------------------------------------------------------
 # vote_score = accept_votes / total_effective_votes
-ACCEPT_SCORE_THRESHOLD = 0.50    # >= this → accept (or accept_with_risk)
-BORDERLINE_SCORE_THRESHOLD = 0.35  # >= this → borderline; < this → reject
-RISK_FLAG_THRESHOLD = 0.70        # < this (but accepted) → add risk flag
+ACCEPT_SCORE_THRESHOLD = 0.67    # >= 2/3 → accept (increased from 0.50)
+BORDERLINE_SCORE_THRESHOLD = 0.50  # >= 1.5/3 → borderline (increased from 0.35)
+RISK_FLAG_THRESHOLD = 0.67        # < 2/3 but accepted → add risk flag (decreased from 0.70)

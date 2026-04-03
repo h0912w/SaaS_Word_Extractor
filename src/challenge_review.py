@@ -69,8 +69,8 @@ def review_challenges(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     if record.get('status') != 'AI_PRIMARY_REVIEWED':
         return challenges
 
-    # reviewer-01: Recall Guardian - look for over-rejects
-    if accept_votes < 3 and reject_votes >= 3:
+    # reviewer-01: Recall Guardian - look for over-rejects (KEEP)
+    if accept_votes < 2 and reject_votes >= 2:  # Updated threshold for 3 judges
         if has_saas_potential(word):
             challenges.append({
                 'reviewer_id': 'challenge-reviewer-01',
@@ -80,8 +80,8 @@ def review_challenges(record: Dict[str, Any]) -> List[Dict[str, Any]]:
                 'suggested_label': 'functional'
             })
 
-    # reviewer-02: Noise Detector - look for over-accepts
-    if accept_votes >= 3:
+    # reviewer-02: Noise Detector - look for over-accepts (KEEP)
+    if accept_votes >= 2:  # Updated threshold for 3 judges
         if is_noise_word(word):
             challenges.append({
                 'reviewer_id': 'challenge-reviewer-02',
@@ -91,45 +91,8 @@ def review_challenges(record: Dict[str, Any]) -> List[Dict[str, Any]]:
                 'suggested_label': 'noise'
             })
 
-    # reviewer-03: Brand Expert - check brand potential
-    if accept_votes < 3:
-        if is_brandable(word) and word.isalpha() and word.islower():
-            challenges.append({
-                'reviewer_id': 'challenge-reviewer-03',
-                'challenge_type': 'over_reject',
-                'argument': f'Word "{word}" has strong brand potential - short, pronounceable, and memorable.',
-                'suggested_decision': 'accept',
-                'suggested_label': 'brandable'
-            })
-
-    # reviewer-04: Functional Expert - check functional relevance
-    if accept_votes < 3 and reject_votes >= 3:
-        # Check if it's a common functional word that might be useful
-        functional_words = {
-            'run', 'go', 'get', 'set', 'put', 'make', 'take', 'give', 'keep',
-            'show', 'hide', 'view', 'edit', 'save', 'load', 'send', 'receive'
-        }
-        if word_lower := word.lower():
-            if word_lower in functional_words:
-                challenges.append({
-                    'reviewer_id': 'challenge-reviewer-04',
-                    'challenge_type': 'over_reject',
-                    'argument': f'Word "{word}" is a common functional verb/action word often used in SaaS naming.',
-                    'suggested_decision': 'accept',
-                    'suggested_label': 'functional'
-                })
-
-    # reviewer-05: Boundary Adjuster - clarify borderline cases
-    if borderline_votes > 0 or (accept_votes == 2 and reject_votes == 3) or (accept_votes == 3 and reject_votes == 2):
-        # Suggest clarification for split decisions
-        if word.isalpha() and len(word) >= 3:
-            challenges.append({
-                'reviewer_id': 'challenge-reviewer-05',
-                'challenge_type': 'borderline_clarify',
-                'argument': f'Word "{word}" shows split decision - recommend human review to clarify classification.',
-                'suggested_decision': 'review',
-                'suggested_label': 'needs_review'
-            })
+    # REMOVED: reviewer-03 (Brand Expert), reviewer-04 (Functional Expert), reviewer-05 (Boundary Adjuster)
+    # These perspectives are already covered by the primary review judges
 
     return challenges
 

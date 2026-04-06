@@ -48,11 +48,16 @@
 ### 5.2 QA 실행 명령
 
 ```bash
-# 전체 파이프라인 QA (처음부터 끝까지)
+# 빠른 QA 테스트 (기본값: 5000 단어)
 python src/qa_full_pipeline.py
 
 # 제한된 단어 수로 QA 테스트
 python src/qa_full_pipeline.py --max-words 10000
+
+# 대규모 청크 테스트 (500만 단어 - CHUNK_SIZE 검증)
+python src/qa_full_pipeline.py --test-chunk-size
+# 또는
+python src/qa_full_pipeline.py --max-words 5000000
 
 # 메모리 제한 설정 (MB 단위, 기본 8192MB = 8GB)
 python src/qa_full_pipeline.py --max-memory-mb 4096
@@ -103,3 +108,44 @@ QA 결과는 다음 위치에서 확인할 수 있다:
 - `output/qa/qa_findings.jsonl` - QA 발견 사항
 - `output/qa/qa_chief_verdict.json` - 최종 판정
 - `output/qa/qa_human_review.xlsx` - 사람 검토용 엑셀
+
+### 5.6 대규모 청크 테스트 (필수)
+
+**CHUNK_SIZE 변경 시 또는 대규모 처리 전 반드시 실행해야 하는 QA 테스트**
+
+대규모 청크 처리가 올바르게 동작하는지 검증하기 위해 다음 테스트를 수행해야 한다:
+
+#### 5.6.1 테스트 목적
+- `--max-words` 제한이 올바르게 동작하는지 검증
+- 500만 단어 처리 시 메모리 사용량이 적정한지 확인
+- 처리 시간이 예상 범위 내인지 확인
+
+#### 5.6.2 테스트 실행 명령
+```bash
+# 500만 단어 청크 처리 테스트
+python src/qa_full_pipeline.py --test-chunk-size
+```
+
+#### 5.6.3 검증 기준
+| 항목 | 기준 | 실패 시 조치 |
+|------|------|--------------|
+| 단어 수 | 400만~600만 단어 범위 내 | `--max-words` 버그 확인 |
+| 메모리 사용 | 8GB 이하 | 메모리 누수 확인 |
+| 처리 시간 | 30분 이내 (Prep 단계) | 병목 지점 확인 |
+| Word Count Verification | PASS | max_words 로직 수정 |
+
+#### 5.6.4 버그 검출 예시
+다음과 같은 문제가 QA 테스트에서 발견되어야 한다:
+
+1. **max_words 무시 문제**: 500만 단어를 지정했는데 2800만 단어를 모두 처리
+   - 원인: `pipeline.py` 들여쓰기 오류로 `actual_max_words`가 설정되지 않음
+   - 검출: Word Count Verification에서 실패
+
+2. **과도한 메모리 사용**: 500만 단어 처리 시 16GB 이상 사용
+   - 원인: 스트리밍 모드 미사용 또는 메모리 누수
+   - 검출: 메모리 모니터링에서 경고
+
+3. **처리 시간 초과**: Prep 단계에서 1시간 이상 소요
+   - 원인: 비효율적인 알고리즘 또는 I/O 병목
+   - 검출: 타임아웃 또는 시간 모니터링
+

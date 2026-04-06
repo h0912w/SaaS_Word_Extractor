@@ -35,6 +35,7 @@ from config import (
     PIPELINE_VERSION,
 )
 from utils import get_logger, append_jsonl, read_jsonl
+from saas_whitelist import SAAS_WHITELIST, is_whitelisted, get_whitelist_category
 
 log = get_logger("rule_screener")
 
@@ -44,7 +45,7 @@ PATH_RE = re.compile(r"[/\\]")
 CODE_DUNDER_RE = re.compile(r"^__\w+__$")
 CODE_HEX_RE = re.compile(r"^0x[0-9a-fA-F]+$")
 CODE_CAMEL_DIGIT_RE = re.compile(r"[a-z][A-Z].*\d|\d.*[a-z][A-Z]")
-REPEAT_CHAR_RE = re.compile(r"^(.)\1{3,}$")  # same char repeated 4+ times
+REPEAT_CHAR_RE = re.compile(r"^(.)\1{2,}$")  # same char repeated 3+ times (aaa, bbb, etc.)
 
 # Generic grammatical words that are clearly not SaaS-appropriate
 GENERIC_WORDS = {
@@ -102,9 +103,16 @@ def _alpha_ratio(s: str) -> float:
 
 def screen_token(word: str) -> tuple[str, str | None]:
     """
-    Returns (result, reason) where result is 'pass' or 'reject'.
-    reason is None for 'pass', or a short label for 'reject'.
+    Returns (result, reason) where result is 'pass', 'reject', or 'whitelist'.
+    reason is None for 'pass', or a short label for 'reject'/'whitelist'.
+
+    Whitelist optimization: 명백한 SaaS 단어는 자동 accept하여 AI 판정 스킵
     """
+    # W1 – Whitelist check (최우선: 명백한 SaaS 단어 자동 accept)
+    if is_whitelisted(word):
+        category = get_whitelist_category(word)
+        return "whitelist", f"saas_{category}"  # AI 판정 스킵
+
     # R1 – empty
     if not word:
         return "reject", "empty_token"

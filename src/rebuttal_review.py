@@ -4,7 +4,10 @@ Rebuttal Review (Step 7) - OPTIMIZED
 Reviews challenges and provides final recommendations.
 Recall-first principle: when uncertain, lean toward accept.
 
-OPTIMIZED: Reduced from 3 reviewers to 1 balanced reviewer for performance
+OPTIMIZED:
+- Reduced from 3 reviewers to 1 balanced reviewer
+- Selective rebuttal: Only for split decisions (2:1 votes)
+- Unanimous decisions skip rebuttal entirely
 """
 
 import json
@@ -59,12 +62,38 @@ def evaluate_challenge(challenge: Dict[str, Any], word: str) -> Dict[str, Any]:
         }
 
 
+def should_rebuttal(record: Dict[str, Any]) -> bool:
+    """
+    Determine if a record should go through rebuttal.
+    OPTIMIZATION: Skip rebuttal for unanimous decisions.
+
+    Returns:
+        True if rebuttal should be performed, False otherwise
+    """
+    summary = record.get('primary_summary', {})
+    accept_votes = summary.get('accept', 0)
+    reject_votes = summary.get('reject', 0)
+    borderline_votes = summary.get('borderline', 0)
+
+    # Skip rebuttal for unanimous accept (3:0)
+    if accept_votes == 3:
+        return False
+
+    # Skip rebuttal for unanimous reject (3:0)
+    if reject_votes == 3:
+        return False
+
+    # Only rebuttal split decisions (2:1)
+    return True
+
+
 def process_file(input_path: Path, output_path: Path) -> Dict[str, int]:
     """Process the challenged file and add rebuttals."""
     stats = {
         'total': 0,
         'with_challenges': 0,
         'without_challenges': 0,
+        'rebuttals_skipped': 0,  # NEW: Track skipped rebuttals
         'rebuttals_added': 0
     }
 
@@ -79,7 +108,27 @@ def process_file(input_path: Path, output_path: Path) -> Dict[str, int]:
                 record = json.loads(line)
                 stats['total'] += 1
 
-                # Get challenges
+                # OPTIMIZATION: Check if rebuttal is needed
+                if not should_rebuttal(record):
+                    stats['rebuttals_skipped'] += 1
+                    # For unanimous decisions, copy record as-is with final decision
+                    summary = record.get('primary_summary', {})
+                    if summary.get('accept', 0) == 3:
+                        record['final_decision'] = 'accept'
+                        record['rebuttal_reason'] = 'Unanimous accept - rebuttal skipped'
+                    else:
+                        record['final_decision'] = 'reject'
+                        record['rebuttal_reason'] = 'Unanimous reject - rebuttal skipped'
+
+                    record['rebuttals'] = []
+                    record['status'] = 'AI_REBUTTED'
+
+                    # Write output
+                    json.dump(record, outfile, ensure_ascii=False)
+                    outfile.write('\n')
+                    continue
+
+                # Get challenges (only for split decisions)
                 challenges = record.get('challenges', [])
 
                 # Process challenges - OPTIMIZED to single rebuttal per challenge
@@ -135,6 +184,7 @@ def main():
     print(f"Total records processed: {stats['total']}")
     print(f"Records with challenges: {stats['with_challenges']}")
     print(f"Records without challenges: {stats['without_challenges']}")
+    print(f"Rebuttals skipped (unanimous): {stats['rebuttals_skipped']}")
     print(f"Total rebuttals added: {stats['rebuttals_added']}")
     print(f"\nOutput written to: {output_path}")
     print("\nNext: python src/pipeline.py --phase consensus")

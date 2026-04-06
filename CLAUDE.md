@@ -3,13 +3,13 @@
 ## 프로젝트 정의
 이 프로젝트는 `/input/` 경로의 대규모 영어 단어 목록 파일을 읽고, **SaaS 웹서비스 제목에 사용할 가능성이 있는 단일 영어 단어만 최대한 많이 추출**하여 `/output/`에 **AI 재입력용 구조화 결과(JSONL/JSON)** 와 **사람 검토용 결과(XLSX/CSV)** 를 함께 생성한다. 이 프로젝트는 **단어 조합을 생성하지 않는다**.
 
-## 실행 모델 — 핵심 전제
-- **AI 판정은 현재 실행 중인 Claude Code 세션(대화)이 직접 수행한다.**
+## 실행 모델 — 메인 Claude Code 세션 오케스트레이션
+- **전체 파이프라인(Steps 1-12)은 메인 Claude Code 세션이 오케스트레이션한다.**
+- 주요 실행 방법: 메인 Claude Code 세션에서 `orchestrator.py`와 `agent_executor.py` 사용
+- AI 판정 단계(Steps 5-7, 12)는 메인 세션이 Agent tool을 사용하여 에이전트를 직접 호출한다.
 - Python 스크립트는 파일 I/O·정규화·규칙 필터링·저장 전용이다.
-- Python 코드 안에서 `anthropic` 패키지를 import하거나 ANTHROPIC_API_KEY를 별도 설정하여 LLM을 직접 호출하지 말 것.
-- 이 규칙은 CLI / 웹(claude.ai/code) / 데스크탑 / IDE 확장 모든 환경에서 동일하게 적용된다.
-- 에이전트는 Python 클래스가 아니라 `.claude/agents/*.md` 명세 파일로 정의한다.
-- 상세 실행 흐름: `docs/workflow-and-agents.md` §6 참조
+- 단계별 실행은 개발/디버깅 용도로만 사용한다.
+- 상세 실행 흐름: `docs/workflow-and-agents.md` §7 참조
 
 ## 절대 원칙
 - 입력 설계서의 요구사항을 누락하지 말 것. 누락 우려가 있으면 `docs/` 문서를 먼저 확인하고 반영할 것.
@@ -64,9 +64,12 @@
 
 ## 출력 계약
 반드시 아래 산출물을 생성할 것.
-- `/output/saas_words.jsonl`
-- `/output/rejected_words.jsonl`
-- `/output/run_summary.json`
+- `/output/saas_words.jsonl` (병합 시에만 생성)
+- `/output/rejected_words.jsonl` (병합 시에만 생성)
+- `/output/run_summary.json` (병합 시에만 생성)
+- `/output/batch_XXX/saas_words_batch_XXX.jsonl` (배치별 개별 출력)
+- `/output/batch_XXX/rejected_words_batch_XXX.jsonl` (배치별 개별 출력)
+- `/output/batch_XXX/run_summary_batch_XXX.json` (배치별 개별 출력)
 - `/output/human_review/saas_words_review.xlsx`
 - `/output/human_review/saas_words_review.csv`
 - `/output/human_review/rejected_words_review.xlsx`
@@ -77,6 +80,12 @@
 - `/output/qa/qa_human_review.xlsx`
 
 AI용 JSONL/JSON과 사람용 XLSX/CSV는 **동일한 원천 레코드** 에서 생성하고 내용 불일치를 허용하지 말 것.
+
+**배치 처리 규칙**:
+- 배치 크기: 100,000단어 단위로 처리 (`BATCH_SIZE = 100000`)
+- 각 배치는 독립적인 `batch_XXX` 디렉토리에 결과 저장
+- 파일명에 배치 번호 포함: `saas_words_batch_001.jsonl`
+- 최종 병합은 사용자가 명시적으로 요청할 때만 수행 (`--phase merge`)
 
 ## 고정 워크플로우
 1. 입력 파일 탐색

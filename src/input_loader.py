@@ -18,6 +18,7 @@ from typing import Iterator
 
 from config import INTER_LOADED, PIPELINE_VERSION
 from utils import get_logger, append_jsonl, read_jsonl
+from input_noise_filter import is_noise_token
 
 log = get_logger("input_loader")
 
@@ -97,24 +98,69 @@ def _iter_file(path: Path) -> Iterator[tuple[str, int]]:
 # Step runner
 # ---------------------------------------------------------------------------
 
+def count_lines(path: Path) -> int:
+    """Count total lines in a file.
+
+    Args:
+        path: Path to file
+
+    Returns:
+        Number of lines
+    """
+    count = 0
+    name = path.name
+
+    if name.endswith(".txt.zst"):
+        import zstandard as zstd
+        with open(path, "rb") as fh:
+            dctx = zstd.ZstdDecompressor()
+            with dctx.stream_reader(fh) as reader:
+                import io
+                text_reader = io.TextIOWrapper(reader, encoding="utf-8", errors="replace")
+                for _ in text_reader:
+                    count += 1
+    else:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for _ in f:
+                count += 1
+
+    return count
+
+
 def run(
     file_descriptors: list[dict],
     resume: bool = False,
+    start_line: int = 1,
     max_lines: int = 0,
-) -> list[dict]:
+) -> int:
     """
     Load all supported input files, write a LOADED intermediate JSONL,
-    and return the list of token records.
+    and return the last line number processed.
     max_lines: stop loading after this many lines total (0 = no limit).
-    If resume=True and the intermediate file exists, skip loading.
+    start_line: start from this line number (1-based).
+    Returns: last line number processed, or 0 if nothing processed.
     """
     if resume and INTER_LOADED.exists():
         log.info("Resuming from %s", INTER_LOADED)
-        return read_jsonl(INTER_LOADED)
+        records = read_jsonl(INTER_LOADED)
+        return len(records) if records else 0
 
-    # Clear file in case we're re-running
+    # Clear file in case we're re-running (handle file lock gracefully)
     if INTER_LOADED.exists():
-        INTER_LOADED.unlink()
+        try:
+            INTER_LOADED.unlink()
+        except PermissionError:
+            # File is locked by another process, just append mode will work
+            log.info("File exists and locked, will append new records")
+
+    # Also try to clear the file content if locked
+    try:
+        if INTER_LOADED.exists():
+            # Try to truncate the file
+            with open(INTER_LOADED, 'w') as f:
+                pass  # Just truncate
+    except PermissionError:
+        log.info("Could not truncate file, continuing with append mode")
 
     supported = [f for f in file_descriptors if f.get("supported")]
     if not supported:
@@ -122,15 +168,33 @@ def run(
 
     records = []
     total_lines = 0
+    end_line = 0
 
     for fd in supported:
         path = Path(fd["path"])
         filename = fd["filename"]
-        log.info("Loading: %s", filename)
+        log.info("Loading: %s (starting from line %d)", filename, start_line)
         file_count = 0
 
         try:
+            total_read = 0
+            noise_filtered = 0
+
             for raw_token, lineno in _iter_file(path):
+                if lineno < start_line:
+                    continue
+                if max_lines and file_count >= max_lines:
+                    log.info("  max_lines=%d reached, stopping early", max_lines)
+                    break
+
+                # 입력 노이즈 필터링 (명백한 노이즈는 사전 제외)
+                is_noise, noise_reason = is_noise_token(raw_token)
+                total_read += 1
+
+                if is_noise:
+                    noise_filtered += 1
+                    continue
+
                 record = {
                     "raw_token": raw_token,
                     "source_file": filename,
@@ -141,15 +205,21 @@ def run(
                 append_jsonl(INTER_LOADED, record)
                 records.append(record)
                 file_count += 1
-                if max_lines and total_lines + file_count >= max_lines:
-                    log.info("  max_lines=%d reached, stopping early", max_lines)
-                    break
+                end_line = lineno  # Track last line processed
+
+            # 노이즈 필터링 통계 로그
+            if total_read > 0:
+                noise_rate = 100 * noise_filtered / total_read
+                log.info("  → Read %d tokens, filtered %d noise (%.1f%%), loaded %d tokens",
+                         total_read, noise_filtered, noise_rate, file_count)
+
         except Exception as exc:
             log.error("Failed to load %s: %s (skipping)", filename, exc)
             continue
 
         total_lines += file_count
-        log.info("  → %d lines loaded from %s", file_count, filename)
+        log.info("  → %d lines loaded from %s (lines %d-%d)",
+                file_count, filename, start_line, end_line)
 
     log.info("Total loaded: %d tokens → %s", total_lines, INTER_LOADED)
-    return records
+    return end_line

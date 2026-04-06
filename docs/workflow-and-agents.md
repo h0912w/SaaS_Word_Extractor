@@ -173,44 +173,153 @@
 ```
 Claude Code 세션 (오케스트레이터)
   │
-  ├─ [Step 1-4]  python src/pipeline.py --steps 1-4
+  ├─ [Step 1-4]  python src/pipeline.py --phase prep --batch-size 100000
   │               결과: output/intermediate/04_screened_tokens.jsonl
   │
   ├─ [Step 5]    Claude Code가 04_screened_tokens.jsonl 읽음
-  │               서브에이전트(saas-title-judge-01..05) 호출
+  │               서브에이전트(saas-title-judge-01..03) 호출
   │               결과: output/intermediate/05_primary_reviewed.jsonl 저장
   │
   ├─ [Step 6-8]  동일 패턴으로 challenge → rebuttal → consensus 수행
   │
-  └─ [Step 9-10] python src/pipeline.py --steps 9-10
+  ├─ [Batch]     python src/pipeline.py --phase batch
+  │               결과: output/batch_XXX/saas_words_batch_XXX.jsonl
+  │
+  └─ [Merge]     python src/pipeline.py --phase merge (사용자 요청 시만)
                   결과: output/saas_words.jsonl, output/human_review/*.xlsx
 ```
 
 에이전트 명세는 `.claude/agents/<agent-id>.md` 파일에 정의한다.
 Python 스크립트가 `anthropic` 패키지를 직접 임포트하여 API를 호출하는 패턴은 **금지**.
 
-## 7. QA 실행 원칙
+## 7. 전체 자동 파이프라인 실행
 
-### 7.1 QA 항상 전체 파이프라인 실행
-QA는 **항상 파이프라인의 처음부터 실행**해야 한다.
+### 7.1 메인 Claude Code 세션 오케스트레이션 (권장 방식)
 
-- 중간 단계부터 재개하면 안 된다
-- 모든 QA 실행은 중간 산출물을 삭제하고 처음부터 시작한다
-- 이는 전체 파이프라인의 무결성을 검증하기 위함이다
+**중요**: 이 파이프라인은 메인 Claude Code 세션이 오케스트레이터 역할을 수행합니다.
+AI 판정 단계(Steps 5, 6, 7, 12)는 메인 세션이 Agent tool을 사용하여 직접 에이전트를 호출합니다.
 
-### 7.2 QA 실행 방법
-```bash
-# 전체 파이프라인 QA (처음부터 끝까지)
-python src/qa_full_pipeline.py
+#### 소규모 데이터 (10만개 이하)
 
-# 제한된 단어 수로 QA 테스트
-python src/qa_full_pipeline.py --max-words 10000
+```python
+# 메인 Claude Code 세션에서 실행
+from src.orchestrator import run_full_pipeline_orchestrated
+from src.agent_executor import call_step5_agents, call_step6_agents, call_step7_agents, call_qa_agents
 
-# 메모리 제한 설정
-python src/qa_full_pipeline.py --max-memory-mb 4096
+# 에이전트 호출 함수 정의
+def agent_caller(step, input_path, output_path, *args):
+    if step == "step5":
+        call_step5_agents(input_path, output_path)
+    elif step == "step6":
+        call_step6_agents(input_path, output_path)
+    elif step == "step7":
+        call_step7_agents(input_path, output_path)
+    elif step == "qa":
+        call_qa_agents(input_path, output_path)
+
+# 전체 파이프라인 실행
+result = run_full_pipeline_orchestrated(agent_caller=agent_caller)
+
+if result["success"]:
+    print("Pipeline completed successfully!")
+else:
+    print(f"Pipeline failed: {result.get('error')}")
 ```
 
-### 7.3 QA 단계별 메모리 모니터링
+#### 대규모 데이터 (10만개 초과)
+
+**30만개 처리 요청 → 자동으로 10만개씩 3배치로 나누어 전체 파이프라인 실행**
+
+```python
+# 메인 Claude Code 세션에서 실행
+from src.batch_orchestrator import run_batch_pipeline
+from src.agent_executor import call_step5_agents, call_step6_agents, call_step7_agents, call_qa_agents
+
+# 에이전트 호출 함수 정의
+def agent_caller(step, input_path, output_path, *args):
+    if step == "step5":
+        call_step5_agents(input_path, output_path)
+    elif step == "step6":
+        call_step6_agents(input_path, output_path)
+    elif step == "step7":
+        call_step7_agents(input_path, output_path)
+    elif step == "qa":
+        call_qa_agents(input_path, output_path)
+
+# 30만개 처리 → 자동으로 10만개씩 3배치 처리
+result = run_batch_pipeline(
+    agent_caller=agent_caller,
+    max_words=300000,      # 처리할 총 단어 수
+    auto_merge=True        # 완료 후 자동 병합
+)
+
+if result["success"]:
+    print(f"All batches completed!")
+    print(f"Batches: {', '.join(map(str, result['batches_completed']))}")
+    print(f"Total words: {result['total_words_processed']}")
+```
+
+**자동 배치 처리 작동 방식:**
+- 30만개 요청 → 자동으로 3개 배치로 분할 (각 10만개)
+- 배치 1: lines 1-100,000 → 전체 파이프라인 실행 → `output/batch_001/`
+- 배치 2: lines 100,001-200,000 → 전체 파이프라인 실행 → `output/batch_002/`
+- 배치 3: lines 200,001-300,000 → 전체 파이프라인 실행 → `output/batch_003/`
+- 완료 후 자동 병합 → `output/saas_words.jsonl` (전체 30만개 결과)
+
+### 7.2 실행 흐름
+
+```
+메인 Claude Code 세션 (오케스트레이터)
+  │
+  ├─ [PHASE 1] Steps 1-4: Input → Load → Normalize → Screen
+  │   └─ python src/pipeline.py --phase prep
+  │
+  ├─ [PHASE 2] Step 5: AI Primary Review
+  │   └─ call_step5_agents() → Agent tool로 saas-title-judge 호출
+  │
+  ├─ [PHASE 3] Step 6: AI Challenge Review
+  │   └─ call_step6_agents() → Agent tool로 challenge-reviewer 호출
+  │
+  ├─ [PHASE 4] Step 7: AI Rebuttal Review
+  │   └─ call_step7_agents() → Agent tool로 rebuttal-reviewer 호출
+  │
+  ├─ [PHASE 5] Step 8: Consensus Aggregation
+  │   └─ python src/pipeline.py --phase consensus
+  │
+  ├─ [PHASE 6] Steps 9-10: JSONL/JSON + XLSX/CSV Export
+  │   └─ python src/pipeline.py --phase export
+  │
+  └─ [PHASE 7] Steps 11-12: QA Analysis
+      └─ call_qa_agents() → Agent tool로 qa-reviewer 호출
+```
+
+### 7.3 단계별 실행 (개발/디버깅용)
+
+각 단계를 별도로 실행할 수도 있습니다:
+
+```bash
+# Steps 1-4: 준비 단계
+python src/pipeline.py --phase prep
+
+# Step 8: 합의 집계 (Steps 5-7 완료 후)
+python src/pipeline.py --phase consensus
+
+# Steps 9-10: 결과 내보내기
+python src/pipeline.py --phase export
+
+# Step 12: QA 리포트 조립
+python src/pipeline.py --phase qa
+```
+
+### 7.4 배치 처리 방식 (100K 단위)
+데이터는 100,000단어 단위(배치)로 처리되며, 각 배치는 독립적으로 결과를 저장합니다:
+- 배치 크기: `BATCH_SIZE = 100,000` (config.py)
+- 배치 출력: `/output/batch_XXX/` 디렉토리에 별도 저장
+- 파일명: `saas_words_batch_XXX.jsonl`, `rejected_words_batch_XXX.jsonl`
+- 자동 병합: **수행하지 않음** (사용자 명령 시에만 병합)
+- 병합 명령: `python src/pipeline.py --phase merge`
+
+### 7.4 QA 단계별 메모리 모니터링
 QA 실행 중 각 단계마다 메모리 사용량을 모니터링한다:
 - Prep: 입력 탐색 → 로드 → 정규화 → 규칙 스크리닝
 - Primary Review: AI 1차 판정

@@ -41,6 +41,7 @@ from config import (
     HUMAN_REVIEW_DIR,
     QA_DIR,
     PIPELINE_VERSION,
+    BATCH_SIZE,
 )
 from utils import get_logger
 
@@ -56,7 +57,8 @@ def _ensure_dirs():
 # Phase: prep  (Steps 1-4)
 # ---------------------------------------------------------------------------
 
-def phase_prep(resume: bool = False, max_words: int = 0, enable_memory_monitor: bool = True):
+def phase_prep(resume: bool = False, max_words: int = 0, start_line: int = 1,
+                enable_memory_monitor: bool = True):
     log.info("=" * 60)
     log.info("Phase: PREP  (Steps 1-4)")
     log.info("=" * 60)
@@ -77,6 +79,11 @@ def phase_prep(resume: bool = False, max_words: int = 0, enable_memory_monitor: 
         import input_loader
         import token_normalizer
         import rule_screener
+        from resume_state import ResumeState
+
+        # Load resume state
+        state = ResumeState()
+        state.load()
 
         # Step 1
         log.info("[Step 1] Input file discovery")
@@ -84,11 +91,59 @@ def phase_prep(resume: bool = False, max_words: int = 0, enable_memory_monitor: 
         supported = [f for f in file_descriptors if f.get("supported")]
         log.info("  %d supported file(s) found", len(supported))
 
+        # Set input file in state
+        if supported:
+            input_path = Path(supported[0]["path"])
+            is_new_file = state.set_input_file(input_path)
+
+            if is_new_file:
+                log.info("  New input file detected, starting fresh")
+            else:
+                log.info("  Same input file, can resume from line %d",
+                        state.get_next_start_line())
+
+            # Count total lines if not yet counted
+            if state.data.get("total_lines", 0) == 0:
+                total_lines = input_loader.count_lines(input_path)
+                state.set_total_lines(total_lines)
+                log.info("  Total lines in input file: %d", total_lines)
+
         # Step 2
         log.info("[Step 2] Loading files (streaming mode)")
+
+        # Determine start line and max lines
+        actual_start_line = start_line
+        actual_max_words = max_words
+
+        if resume and state.can_resume():
+            actual_start_line = state.get_next_start_line()
+            log.info("  Resuming from line %d", actual_start_line)
+            if actual_max_words == 0:
+                # Default to batch size if resuming without explicit max
+                actual_max_words = BATCH_SIZE
+
         # Don't load into memory - just process to file directly
-        input_loader.run(file_descriptors, resume=resume, max_lines=max_words)
+        end_line = input_loader.run(
+            file_descriptors,
+            resume=False,  # Always process
+            start_line=actual_start_line,
+            max_lines=actual_max_words
+        )
         log.info("  Loaded tokens written to file")
+
+        # Update resume state
+        if end_line and end_line > actual_start_line:
+            batch_num = len(state.data.get("batches_completed", [])) + 1
+            state.mark_chunk_completed(
+                batch_number=batch_num,
+                start_line=actual_start_line,
+                end_line=end_line,
+                words_processed=end_line - actual_start_line + 1
+            )
+            log.info("  Progress: %.1f%% (%d / %d lines)",
+                    state.get_progress_percent(),
+                    state.get_last_processed_line(),
+                    state.data.get("total_lines", 0))
 
         # Step 3+4: Process normalization and screening in streaming mode
         log.info("[Step 3-4] Normalization and screening (streaming mode)")
@@ -119,11 +174,21 @@ def _normalize_and_screen_streaming(monitor=None):
 
     INTER_SCREENED.parent.mkdir(parents=True, exist_ok=True)
     if INTER_SCREENED.exists():
-        INTER_SCREENED.unlink()
+        try:
+            INTER_SCREENED.unlink()
+        except PermissionError:
+            log.info("INTER_SCREENED is locked, will append new records")
+            try:
+                # Try to truncate the file
+                with open(INTER_SCREENED, 'w') as f:
+                    pass  # Just truncate
+            except PermissionError:
+                log.info("Could not truncate INTER_SCREENED, continuing with append mode")
 
     seen_words = set()
     passed_count = 0
     rejected_count = 0
+    whitelisted_count = 0  # Whitelist 카운트 추가
 
     # Stream from loaded tokens
     from utils import iter_jsonl
@@ -163,7 +228,9 @@ def _normalize_and_screen_streaming(monitor=None):
             from utils import append_jsonl
             append_jsonl(INTER_SCREENED, updated)
 
-            if result == "pass":
+            if result == "whitelist":
+                whitelisted_count += 1  # Whitelist 카운트
+            elif result == "pass":
                 passed_count += 1
             else:
                 rejected_count += 1
@@ -175,7 +242,10 @@ def _normalize_and_screen_streaming(monitor=None):
             gc.collect()
 
     log.info("  Total processed: %d", total_processed)
-    log.info("  Passed: %d, Rejected: %d", passed_count, rejected_count)
+    log.info("  Whitelist: %d, Passed: %d, Rejected: %d",
+             whitelisted_count, passed_count, rejected_count)
+    log.info("  AI review skip rate: %.1f%% (whitelist / total)",
+             100 * whitelisted_count / max(total_processed, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +405,60 @@ def phase_qa():
 
 
 # ---------------------------------------------------------------------------
+# Phase: step5  (Step 5 — AI Primary Review)
+# ---------------------------------------------------------------------------
+
+def phase_step5():
+    """Step 5: AI Primary Review using rule-based fallback."""
+    log.info("=" * 60)
+    log.info("Phase: STEP 5  (AI Primary Review)")
+    log.info("=" * 60)
+    _ensure_dirs()
+
+    import agent_executor
+
+    output_path = agent_executor.call_step5_agents()
+    log.info("Step 5 complete → %s", output_path)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Phase: step6  (Step 6 — AI Challenge Review)
+# ---------------------------------------------------------------------------
+
+def phase_step6():
+    """Step 6: AI Challenge Review using rule-based fallback."""
+    log.info("=" * 60)
+    log.info("Phase: STEP 6  (AI Challenge Review)")
+    log.info("=" * 60)
+    _ensure_dirs()
+
+    import agent_executor
+
+    output_path = agent_executor.call_step6_agents()
+    log.info("Step 6 complete → %s", output_path)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Phase: step7  (Step 7 — AI Rebuttal Review)
+# ---------------------------------------------------------------------------
+
+def phase_step7():
+    """Step 7: AI Rebuttal Review using rule-based fallback."""
+    log.info("=" * 60)
+    log.info("Phase: STEP 7  (AI Rebuttal Review)")
+    log.info("=" * 60)
+    _ensure_dirs()
+
+    import agent_executor
+
+    output_path = agent_executor.call_step7_agents()
+    log.info("Step 7 complete → %s", output_path)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -347,33 +471,93 @@ def main():
     parser.add_argument(
         "--phase",
         required=True,
-        choices=["prep", "consensus", "export", "qa"],
+        choices=["prep", "consensus", "export", "qa", "batch", "merge", "status",
+                 "step5", "step6", "step7"],
         help="실행할 파이프라인 단계",
     )
     parser.add_argument("--resume", action="store_true",
                         help="중간 파일이 있으면 해당 단계 재사용")
+    parser.add_argument("--resume-auto", action="store_true",
+                        help="resume_state.json를 확인하여 자동으로 다음 청크 처리")
     parser.add_argument("--max-words", type=int, default=0,
                         help="prep 단계 처리 단어 수 제한 (테스트용, 0=무제한)")
     parser.add_argument("--enable-memory-monitor", action="store_true", default=True,
                         help="Enable memory monitoring (default: True)")
     parser.add_argument("--disable-memory-monitor", action="store_true",
                         help="Disable memory monitoring")
+    parser.add_argument("--batch-start", type=int, default=1,
+                        help="Batch processing: starting line number (default: 1)")
+    parser.add_argument("--batch-size", type=int, default=100000,
+                        help="Batch processing: words per batch (default: 100000)")
+    parser.add_argument("--merge-batches", action="store_true",
+                        help="Merge all batch outputs into final combined files")
+    parser.add_argument("--reset", action="store_true",
+                        help="진행 상황 초기화 (처음부터 다시 시작)")
     args = parser.parse_args()
 
     start = datetime.datetime.utcnow()
 
+    # Handle reset
+    if args.reset:
+        from resume_state import ResumeState
+        state = ResumeState()
+        state.load()
+        state.reset()
+        log.info("Progress reset. Starting from the beginning.")
+        return
+
+    # Handle status
+    if args.phase == "status":
+        from resume_state import ResumeState
+        import json
+        state = ResumeState()
+        state.load()
+        status = state.get_status()
+        print(json.dumps(status, indent=2))
+        return
+
     # Determine if memory monitoring should be enabled
     enable_memory_monitor = args.enable_memory_monitor and not args.disable_memory_monitor
 
+    # Handle --resume-auto
+    actual_resume = args.resume or args.resume_auto
+
     try:
         if args.phase == "prep":
-            phase_prep(resume=args.resume, max_words=args.max_words, enable_memory_monitor=enable_memory_monitor)
+            phase_prep(resume=actual_resume, max_words=args.max_words,
+                      start_line=args.batch_start, enable_memory_monitor=enable_memory_monitor)
         elif args.phase == "consensus":
             phase_consensus(resume=args.resume, enable_memory_monitor=enable_memory_monitor)
         elif args.phase == "export":
             phase_export(resume=args.resume, enable_memory_monitor=enable_memory_monitor)
         elif args.phase == "qa":
             phase_qa()
+        elif args.phase == "step5":
+            phase_step5()
+        elif args.phase == "step6":
+            phase_step6()
+        elif args.phase == "step7":
+            phase_step7()
+        elif args.phase == "batch":
+            from batch_processor import BatchProcessor
+            input_file = Path("input/all_words_deduped.txt")
+            if not input_file.exists():
+                input_file = Path("input/all_words_deduped.txt.zst")
+            processor = BatchProcessor(input_file)
+            batch = processor.get_next_batch()
+            if batch:
+                result = processor.process_batch(batch)
+                if result["success"]:
+                    log.info(f"Batch #{result['batch_number']:03d} completed!")
+                else:
+                    log.error(f"Batch processing failed: {result.get('error')}")
+            else:
+                log.info("All batches completed!")
+        elif args.phase == "merge":
+            # Handle merge_batches flag or explicit merge phase
+            from result_writer import merge_all_batches
+            merge_all_batches()
+            log.info("All batch outputs merged successfully!")
     except KeyboardInterrupt:
         log.warning("Interrupted.")
         sys.exit(1)

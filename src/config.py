@@ -59,7 +59,19 @@ CHALLENGE_REVIEWER_COUNT = 2  # Reduced from 5 (keep: Recall Guardian, Noise Det
 REBUTTAL_REVIEWER_COUNT = 1  # Reduced from 3 (keep: Balance Arbitrator)
 
 # Number of words fed to each AI agent call at once
-AI_BATCH_SIZE = int(os.environ.get("AI_BATCH_SIZE", "100"))  # Increased from 50
+AI_BATCH_SIZE = int(os.environ.get("AI_BATCH_SIZE", "200"))  # Increased from 100 to 200
+
+# ---------------------------------------------------------------------------
+# Parallel processing configuration
+# ---------------------------------------------------------------------------
+PARALLEL_WORKERS = int(os.environ.get("PARALLEL_WORKERS", "4"))  # Number of parallel workers
+PARALLEL_ENABLED = os.environ.get("PARALLEL_ENABLED", "true").lower() == "true"  # Enable/disable parallel processing
+
+# ---------------------------------------------------------------------------
+# Batch processing configuration
+# ---------------------------------------------------------------------------
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "100000"))  # 100K words per batch
+PROGRESS_DIR = OUTPUT_DIR / "progress"  # Progress tracking directory
 
 # ---------------------------------------------------------------------------
 # Rule screener thresholds

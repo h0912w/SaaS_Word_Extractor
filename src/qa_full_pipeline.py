@@ -245,6 +245,68 @@ def run_command(
         return False
 
 
+def verify_word_count(max_words: int, base_dir: Path) -> bool:
+    """Verify that the correct number of words were processed.
+
+    Args:
+        max_words: Expected max words to process
+        base_dir: Base project directory
+
+    Returns:
+        True if word count matches expected, False otherwise
+    """
+    if max_words == 0:
+        return True  # Skip verification for unlimited mode
+
+    # Check final output files to verify word count
+    # Use consensus file as it's the final step before export
+    consensus_file = base_dir / "output" / "intermediate" / "08_consensus.jsonl"
+
+    if not consensus_file.exists():
+        print(f"[ERROR] Consensus file not found: {consensus_file}")
+        return False
+
+    # Count lines in consensus file
+    line_count = 0
+    accept_count = 0
+    reject_count = 0
+    with open(consensus_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip():
+                line_count += 1
+                try:
+                    import json
+                    record = json.loads(line)
+                    if record.get("decision") == "accept":
+                        accept_count += 1
+                    elif record.get("decision") == "reject":
+                        reject_count += 1
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+    # Verify count matches expected (allow some tolerance for normalization/rejection)
+    # We expect approximately max_words * 0.7 to 1.0 (due to normalization and screening)
+    expected_min = int(max_words * 0.6)  # At least 60% should survive to consensus
+    expected_max = int(max_words * 1.1)   # At most 110%
+
+    if line_count < expected_min:
+        print(f"[ERROR] Word count verification FAILED:")
+        print(f"  Expected at least: {expected_min} words")
+        print(f"  Actual processed: {line_count} words")
+        print(f"  This suggests max_words limit was NOT properly applied!")
+        return False
+    elif line_count > expected_max:
+        print(f"[ERROR] Word count verification FAILED:")
+        print(f"  Expected at most: {expected_max} words")
+        print(f"  Actual processed: {line_count} words")
+        print(f"  This suggests max_words limit was NOT properly applied!")
+        return False
+    else:
+        print(f"[PASS] Word count verification: {line_count} words (expected range: {expected_min}-{expected_max})")
+        print(f"  Accept: {accept_count}, Reject: {reject_count}")
+        return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Full QA Pipeline - Run complete pipeline from scratch"
@@ -252,8 +314,8 @@ def main():
     parser.add_argument(
         "--max-words",
         type=int,
-        default=0,
-        help="Maximum words to process (0=unlimited, default: 0)"
+        default=5000,  # Changed from 0 to 5000 for faster testing by default
+        help="Maximum words to process (default: 5000 for quick test, use 5000000 for chunk testing)"
     )
     parser.add_argument(
         "--max-memory-mb",
@@ -266,7 +328,17 @@ def main():
         action="store_true",
         help="Skip cleanup step (use existing intermediates)"
     )
+    parser.add_argument(
+        "--test-chunk-size",
+        action="store_true",
+        help="Test with 5M words to verify chunk processing (overrides --max-words)"
+    )
     args = parser.parse_args()
+
+    # If testing chunk size, use 5M words
+    if args.test_chunk_size:
+        args.max_words = 5000000
+        print("[INFO] Testing chunk size: using 5M words")
 
     base_dir = Path('C:/Users/h0912/claude_project/SaaS_Word_Extractor')
 
@@ -344,6 +416,16 @@ def main():
         ):
             success = False
             goto_end = True
+
+    # Verify word count if max_words was specified
+    if success and args.max_words > 0:
+        print("\n" + "=" * 60)
+        print("WORD COUNT VERIFICATION")
+        print("=" * 60)
+        if not verify_word_count(args.max_words, base_dir):
+            print("[ERROR] Word count verification FAILED!")
+            print("This indicates a bug in the max_words limit handling.")
+            success = False
 
     # Final report
     overall_elapsed = time.time() - overall_start

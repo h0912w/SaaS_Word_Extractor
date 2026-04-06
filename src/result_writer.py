@@ -2,12 +2,16 @@
 Step 9 — Result writer.
 Splits consensus records into accepted and rejected sets,
 validates JSONL schema, and writes:
-  /output/saas_words.jsonl
-  /output/rejected_words.jsonl
-  /output/run_summary.json
+  /output/saas_words_batch_XXX.jsonl
+  /output/rejected_words_batch_XXX.jsonl
+  /output/run_summary_batch_XXX.json
+  /output/batch_XXX/... (for batched processing)
 
-Also writes rejected rule-screened tokens into rejected_words.jsonl
+Also writes rejected rule-screened tokens into rejected_words_batch_XXX.jsonl
 so the final file is comprehensive.
+
+NOTE: Auto-merge is disabled. Merge is only performed when explicitly requested
+via --merge-batches flag or --phase merge command.
 """
 
 import csv
@@ -23,8 +27,9 @@ from config import (
     OUT_RUN_SUMMARY,
     OUT_SAAS_WORDS,
     PIPELINE_VERSION,
+    OUTPUT_DIR,
 )
-from utils import get_logger, iter_jsonl, iter_jsonl_filter, write_json
+from utils import get_logger, iter_jsonl, iter_jsonl_filter, write_json, write_jsonl
 
 log = get_logger("result_writer")
 
@@ -313,3 +318,129 @@ def _write_run_summary_streaming(saas_path: Path, rejected_path: Path,
     }
     write_json(OUT_RUN_SUMMARY, summary)
     log.info("Wrote run summary → %s", OUT_RUN_SUMMARY)
+
+
+# ---------------------------------------------------------------------------
+# Batch-specific output functions
+# ---------------------------------------------------------------------------
+
+def run_batch_output(batch_number: int, consensus_records: list[dict],
+                    run_meta: dict | None = None) -> tuple[Path, Path]:
+    """
+    Write output files for a specific batch.
+    Creates separate output directory for each batch with batch-numbered filenames.
+
+    Args:
+        batch_number: Batch number (1-indexed)
+        consensus_records: List of consensus records for this batch
+        run_meta: Optional run metadata
+
+    Returns:
+        Tuple of (saas_path, rejected_path)
+    """
+    batch_dir = OUTPUT_DIR / f"batch_{batch_number:03d}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use batch-numbered filenames
+    saas_path = batch_dir / f"saas_words_batch_{batch_number:03d}.jsonl"
+    rejected_path = batch_dir / f"rejected_words_batch_{batch_number:03d}.jsonl"
+    summary_path = batch_dir / f"run_summary_batch_{batch_number:03d}.json"
+
+    saas_records: list[dict] = []
+    rejected_records: list[dict] = []
+
+    for rec in consensus_records:
+        decision = rec.get("decision") or rec.get("consensus_decision", "reject")
+        if decision == "accept":
+            sr = _build_saas_record(rec)
+            _validate_schema(sr, REQUIRED_SAAS_FIELDS, "saas")
+            saas_records.append(sr)
+        else:
+            rr = _build_reject_record(rec)
+            _validate_schema(rr, REQUIRED_REJECT_FIELDS, "rejected")
+            rejected_records.append(rr)
+
+    # Write JSONL files
+    write_jsonl(saas_path, saas_records)
+    write_jsonl(rejected_path, rejected_records)
+    log.info("[Batch %03d] Wrote %d SaaS words → %s", batch_number, len(saas_records), saas_path)
+    log.info("[Batch %03d] Wrote %d rejected words → %s", batch_number, len(rejected_records), rejected_path)
+
+    # Build batch summary
+    label_dist = Counter(r.get("primary_label", "unknown") for r in saas_records)
+    risk_dist = Counter(flag for r in saas_records for flag in r.get("risk_flags", []))
+    reject_reason_dist = Counter(
+        (r.get("reject_reason") or ["unknown"])[0] for r in rejected_records
+    )
+
+    summary = {
+        "batch_number": batch_number,
+        "pipeline_version": PIPELINE_VERSION,
+        "run_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "input_stats": run_meta or {},
+        "total_accepted": len(saas_records),
+        "total_rejected": len(rejected_records),
+        "label_distribution": dict(label_dist),
+        "risk_flag_distribution": dict(risk_dist),
+        "reject_reason_distribution": dict(reject_reason_dist),
+    }
+    write_json(summary_path, summary)
+    log.info("[Batch %03d] Wrote batch summary → %s", batch_number, summary_path)
+
+    return saas_path, rejected_path
+
+
+def merge_all_batches():
+    """
+    Merge all batch outputs into a single combined output.
+    Reads all batch_*/saas_words_batch_*.jsonl and batch_*/rejected_words_batch_*.jsonl
+    and combines them into /output/saas_words.jsonl and /output/rejected_words.jsonl
+
+    This function is ONLY called when explicitly requested via --merge-batches flag
+    or --phase merge command. It is NOT called automatically during normal processing.
+    """
+    batch_dirs = sorted(OUTPUT_DIR.glob("batch_*/"))
+    if not batch_dirs:
+        log.warning("No batch directories found to merge")
+        return
+
+    log.info("Merging %d batch directories...", len(batch_dirs))
+
+    all_saas = []
+    all_rejected = []
+    total_saas = 0
+    total_rejected = 0
+
+    for batch_dir in batch_dirs:
+        # Find the batch-specific files (they have batch numbers in filename)
+        saas_files = list(batch_dir.glob("saas_words_batch_*.jsonl"))
+        rejected_files = list(batch_dir.glob("rejected_words_batch_*.jsonl"))
+
+        for saas_file in saas_files:
+            for rec in iter_jsonl(saas_file):
+                all_saas.append(rec)
+                total_saas += 1
+
+        for rejected_file in rejected_files:
+            for rec in iter_jsonl(rejected_file):
+                all_rejected.append(rec)
+                total_rejected += 1
+
+    # Write combined outputs
+    write_jsonl(OUT_SAAS_WORDS, all_saas)
+    write_jsonl(OUT_REJECTED_WORDS, all_rejected)
+
+    log.info("Merged %d SaaS words → %s", total_saas, OUT_SAAS_WORDS)
+    log.info("Merged %d rejected words → %s", total_rejected, OUT_REJECTED_WORDS)
+
+    # Write combined summary
+    combined_summary = {
+        "pipeline_version": PIPELINE_VERSION,
+        "run_timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "batches_processed": len(batch_dirs),
+        "total_accepted": total_saas,
+        "total_rejected": total_rejected,
+        "merge_type": "manual_merge",
+    }
+    write_json(OUT_RUN_SUMMARY, combined_summary)
+    log.info("Wrote combined summary → %s", OUT_RUN_SUMMARY)
